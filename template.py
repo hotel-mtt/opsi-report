@@ -7,7 +7,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import io, requests, re, hashlib
-import streamlit.components.v1 as components          # ← PATCH 1: tambah import
+import streamlit.components.v1 as components
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(
@@ -345,14 +345,9 @@ def gsec(title, icon=""):
     st.markdown(f'<div class="gsec">{lbl}</div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PATCH 2 — Fungsi build_donut_html (clean minimal donut chart)
-# Letakkan di sini, setelah gsec() dan sebelum CSS st.markdown
+# Fungsi build_donut_html (clean minimal donut chart)
 # ══════════════════════════════════════════════════════════════════════════════
 def build_donut_html(segments, total_label, subtitle=""):
-    """
-    Clean minimal donut chart + bar legend.
-    segments: list[dict] — label, value, pct, color, sub
-    """
     import json
     segs_js = json.dumps(segments, ensure_ascii=False)
     return f"""<!DOCTYPE html>
@@ -461,7 +456,6 @@ document.getElementById('cnum').textContent=TOTAL;
 document.getElementById('ts').textContent=
   new Date().toLocaleDateString('id-ID',{{day:'2-digit',month:'short',year:'numeric'}});
 
-// Convert pct to sweep angle in radians, with gap
 const total_pct=SEGS.reduce((a,s)=>a+s.pct,0)||100;
 const gap_deg=GAP;
 const available=360 - gap_deg*SEGS.length;
@@ -483,14 +477,12 @@ function arcPath(cx,cy,r,sw,startDeg,endDeg){{
          `L ${{ix1}} ${{iy1}} A ${{ri}} ${{ri}} 0 ${{large}} 0 ${{ix2}} ${{iy2}} Z`;
 }}
 
-// Draw track (background)
 const trackEl=document.createElementNS('http://www.w3.org/2000/svg','circle');
 trackEl.setAttribute('cx',CX);trackEl.setAttribute('cy',CY);trackEl.setAttribute('r',R);
 trackEl.setAttribute('fill','none');trackEl.setAttribute('stroke','#F1F5F9');
 trackEl.setAttribute('stroke-width',SW);
 svg.appendChild(trackEl);
 
-// Animate arcs
 let startDeg=0;
 const paths=[];
 SEGS.forEach((sg,i)=>{{
@@ -506,10 +498,8 @@ SEGS.forEach((sg,i)=>{{
   startDeg=endDeg+gap_deg;
 }});
 
-// Fade in
 setTimeout(()=>paths.forEach(p=>p.path.style.opacity='1'),100);
 
-// Legend
 const lg=document.getElementById('lg');
 SEGS.forEach((sg,i)=>{{
   const row=document.createElement('div');
@@ -687,6 +677,21 @@ button[data-testid="baseButton-header"],
 .stag-err  { background:#FFF1F2; color:#DC2626; border:1px solid #FECACA; }
 .stag-wait { background:#F8FAFC; color:var(--t4); border:1px solid var(--border); }
 
+/* ══ FIX: Uploader — sembunyikan label bawaan Streamlit sepenuhnya ══ */
+[data-testid="stSidebar"] [data-testid="stFileUploader"] label,
+[data-testid="stSidebar"] [data-testid="stFileUploader"] [data-testid="stWidgetLabel"],
+[data-testid="stSidebar"] [data-testid="stFileUploader"] [data-testid="stWidgetLabel"] p,
+[data-testid="stSidebar"] .stFileUploader label,
+[data-testid="stSidebar"] .stFileUploader [data-testid="stWidgetLabel"],
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzoneInstructions"] ~ div label {
+  display: none !important;
+  visibility: hidden !important;
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+}
+
 [data-testid="stSidebar"] [data-testid="stFileUploader"] {
   background:#FAFFFE!important; border:1.5px dashed var(--primary-mid)!important;
   border-radius:var(--r)!important; transition:all .2s!important;
@@ -698,8 +703,6 @@ button[data-testid="baseButton-header"],
 [data-testid="stSidebar"] [data-testid="stFileUploaderDropzoneInstructions"] p { font-size:.65rem!important; color:var(--t4)!important; }
 [data-testid="stSidebar"] [data-testid="stFileUploaderDropzoneInstructions"] span { color:var(--primary)!important; font-weight:600!important; }
 [data-testid="stSidebar"] .stFileUploader { padding:0 12px!important; margin-bottom:6px!important; }
-[data-testid="stSidebar"] label,
-[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p { font-size:.67rem!important; font-weight:500!important; color:var(--t2)!important; margin-bottom:4px!important; }
 [data-testid="stSidebar"] [data-testid="stMultiSelect"] > div > div,
 [data-testid="stSidebar"] [data-testid="stDateInput"] input {
   background:#fff!important; border:1px solid var(--border)!important;
@@ -712,6 +715,14 @@ button[data-testid="baseButton-header"],
 }
 [data-testid="stSidebar"] .stMultiSelect,
 [data-testid="stSidebar"] .stDateInput { padding:0 12px!important; margin-bottom:8px!important; }
+
+/* ══ Label untuk widget lain di sidebar (bukan uploader) ══ */
+[data-testid="stSidebar"] [data-testid="stMultiSelect"] label,
+[data-testid="stSidebar"] [data-testid="stMultiSelect"] [data-testid="stWidgetLabel"] p,
+[data-testid="stSidebar"] [data-testid="stDateInput"] label,
+[data-testid="stSidebar"] [data-testid="stDateInput"] [data-testid="stWidgetLabel"] p {
+  font-size:.67rem!important; font-weight:500!important; color:var(--t2)!important; margin-bottom:4px!important;
+}
 
 /* ══ BUTTONS ══ */
 [data-testid="stButton"] > button {
@@ -857,9 +868,6 @@ button[data-testid="baseButton-header"],
 .sc-badge-sm.down { background:#FFF1F2; color:#DC2626; border:1px solid #FECACA; }
 .sc-badge-sm.neu  { background:#F8FAFC; color:var(--t4); border:1px solid var(--border); }
 
-.kpi-row,.kpi-row-top,.kpi-row-bot,.kpi-row-mid,
-.gkpi,.gkpi-sm,.gkpi-indigo,.gkpi-teal,.gkpi-emerald,
-.gkpi-rose,.gkpi-amber,.gkpi-sky,.gkpi-violet { }
 .gkpi-trend { display:none; }
 
 /* ══ PIC2 SCORECARD ══ */
@@ -1069,23 +1077,9 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Build df_raw BEFORE sidebar ───────────────────────────────────────────────
-_up_raw = st.session_state.get("main_upload") or []
-_up     = [f for f in _up_raw if _is_valid_file(f)]   # buang DeletedFile
-
-if _up:
-    _h  = compute_upload_hash(_up)
-    _nm = st.session_state.get("norm_maps", {})
-    if _h and (st.session_state.get("upload_hash") != _h or "df_raw" not in st.session_state):
-        with st.spinner("Memproses & menormalisasi data..."):
-            st.session_state["df_raw"]      = build_df_raw(_up, _nm)
-            st.session_state["upload_hash"] = _h
-else:
-    # Jika slot upload memang kosong (bukan sekadar DeletedFile), bersihkan state
-    if not _up_raw:
-        for k in ["df_raw","upload_hash"]: st.session_state.pop(k, None)
-
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ── Sidebar (dengan file_uploader — HANYA di sini, satu kali) ─────────────────
+# BUG FIX: Sidebar didefinisikan SEBELUM membaca session state upload,
+# agar widget ter-render lebih dulu dan key "main_upload" sudah terdaftar.
 with st.sidebar:
     st.markdown("""
     <div class="sb-top">
@@ -1103,9 +1097,18 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.markdown('<div class="sb-section">Data Utama</div>', unsafe_allow_html=True)
-    st.file_uploader("Upload Custom Report (.xlsx)", type=["xlsx"],
-                     accept_multiple_files=True, key="main_upload",
-                     label_visibility="collapsed")
+
+    # ── BUG FIX: Gunakan label kosong "" dan label_visibility="collapsed"
+    # agar tidak ada teks label yang muncul ganda.
+    # Tambahan: key unik dan stabil agar tidak re-render dobel.
+    st.file_uploader(
+        "Upload",                      # label pendek — disembunyikan via CSS
+        type=["xlsx"],
+        accept_multiple_files=True,
+        key="main_upload",
+        label_visibility="collapsed",  # sembunyikan label bawaan Streamlit
+        help="Upload file Excel Custom Report (.xlsx) · maks 200MB per file"
+    )
 
     st.markdown('<div class="sb-divider"></div><div class="sb-section">Normalisasi · Google Drive</div>', unsafe_allow_html=True)
     _ss = st.session_state.get("sync_state", {})
@@ -1169,6 +1172,23 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+# ── Build df_raw SETELAH sidebar (widget sudah terdaftar) ─────────────────────
+# BUG FIX: Pindahkan pemrosesan upload ke SETELAH blok sidebar,
+# sehingga "main_upload" sudah ada di session_state saat dibaca.
+_up_raw = st.session_state.get("main_upload") or []
+_up     = [f for f in _up_raw if _is_valid_file(f)]
+
+if _up:
+    _h  = compute_upload_hash(_up)
+    _nm = st.session_state.get("norm_maps", {})
+    if _h and (st.session_state.get("upload_hash") != _h or "df_raw" not in st.session_state):
+        with st.spinner("Memproses & menormalisasi data..."):
+            st.session_state["df_raw"]      = build_df_raw(_up, _nm)
+            st.session_state["upload_hash"] = _h
+else:
+    if not _up_raw:
+        for k in ["df_raw","upload_hash"]: st.session_state.pop(k, None)
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 uploaded_files = [f for f in (st.session_state.get("main_upload") or []) if _is_valid_file(f)]
 
@@ -1205,8 +1225,6 @@ if uploaded_files and "df_raw" in st.session_state:
     # TAB 1 — Summary
     # ═══════════════════════════════════════════════════════════════
     with tab1:
-        # JS counter removed — st.markdown strips <script> tags
-
         # ── Compute KPIs ─────────────────────────────────────────────
         tr  = len(df_view)
         tc  = len(df_view.columns)
@@ -1240,7 +1258,6 @@ if uploaded_files and "df_raw" in st.session_state:
 
         # ── Badge helpers ─────────────────────────────────────────────
         def _badge(curr, prev_val, reverse=False, size="normal"):
-            # Pill neutral ketika belum ada data pembanding
             _neu_sm  = ('<span style="display:inline-flex;align-items:center;gap:3px;'
                         'font-size:.53rem;font-weight:600;padding:2px 7px;border-radius:20px;margin-top:2px;'
                         'background:#F8FAFC;color:#94A3B8;border:1px solid #E2E8F0;">'
@@ -1753,9 +1770,6 @@ if uploaded_files and "df_raw" in st.session_state:
             else:
                 st.info("Kolom 'Invoice To' tidak ditemukan dalam data.")
 
-        # ══════════════════════════════════════════════════════════════
-        # PATCH 3 — ch2: Concentric Rings menggantikan Plotly pie chart
-        # ══════════════════════════════════════════════════════════════
         with ch2:
             dom_col = next(
                 (c for c in df_view.columns
@@ -1805,7 +1819,6 @@ if uploaded_files and "df_raw" in st.session_state:
                 )
                 st.caption(caption_text)
 
-            # Kasus 1: ada kolom destinasi eksplisit
             if dom_col and "Invoice No" in df_view.columns:
                 _df_dom_raw = (
                     df_view[[dom_col, "Invoice No"]]
@@ -1820,7 +1833,6 @@ if uploaded_files and "df_raw" in st.session_state:
                     .reset_index()
                     .rename(columns={"Invoice No": "Invoice Unik"})
                 )
-                # Top-4 + Others
                 if len(dom_grp) > 4:
                     top4 = dom_grp.nlargest(4, "Invoice Unik").reset_index(drop=True)
                     oth  = dom_grp.nlargest(len(dom_grp), "Invoice Unik").iloc[4:]["Invoice Unik"].sum()
@@ -1835,7 +1847,6 @@ if uploaded_files and "df_raw" in st.session_state:
                 col_lbl = "Normalized Invoice To" if dom_col == "Normalized_Inv_To" else dom_col
                 _render_rings(segs, total, f"*Kolom: {col_lbl}")
 
-            # Kasus 2: klasifikasi dari Product Type
             elif "Product Type" in df_view.columns and "Invoice No" in df_view.columns:
                 df_dom = df_view.copy()
                 df_dom["Dom_Int"] = df_dom["Product Type"].astype(str).apply(
@@ -1853,7 +1864,6 @@ if uploaded_files and "df_raw" in st.session_state:
                 segs, total = _build_segs(dom_grp2, "Dom_Int")
                 _render_rings(segs, total, "*Diklasifikasikan dari kolom Product Type")
 
-            # Kasus 3: data tidak tersedia
             else:
                 st.info("Kolom Domestic/International tidak ditemukan dalam data.")
 
