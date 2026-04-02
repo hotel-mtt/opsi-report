@@ -4,6 +4,7 @@ numpy
 openpyxl
 xlsxwriter
 plotly
+matplotlib
 gspread
 oauth2client
 google-auth
