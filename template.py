@@ -75,8 +75,8 @@ AGENT_MAP = {
     "gerald":               "Gerald",
     "vial":                 "Vial",
     "Vial":                 "Vial",
-    "rifyal":                "Vial",
-    "Rifyal":                "Vial",
+    "rifyal.tumber":        "Vial",
+    "Rifyal.Tumber":        "Vial",
     "achmad.vial":          "Vial",
 }
 
