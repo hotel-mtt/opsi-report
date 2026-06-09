@@ -49,16 +49,32 @@ DROP_SET = frozenset([
 
 GLASS_PALETTE = ["#0D9488","#134E4A","#2DD4BF","#5EEAD4","#99F6E4","#CCFBF1","#0F766E","#042F2E"]
 TEAL_SCALE    = ["#CCFBF1","#99F6E4","#2DD4BF","#0D9488","#0F766E","#134E4A"]
-KNOWN_PICS    = ["Farras","Ade","Meiji","Vero","Firda","Selvy","Rida","Rifyal","Gerald","Baldy","Fandi","API-DTM"]
+
+# Nama-nama ini tampil sebagai kartu individual — sisanya semua jadi "Other"
+KNOWN_PICS = ["API-DTM","Ade","Farras","Selvy","Vero","Firda","Meiji","Rida","Gerald","Baldy","Vial"]
 
 AGENT_MAP = {
-    "client-cre-mic-opc": "API-DTM", "client-cre-ptrmtt-cp": "API-DTM",
-    "farras": "Farras", "firda": "Firda", "rida.manora": "Rida",
-    "meijika": "Meiji", "veronica": "Vero", "selvy": "Selvy",
-    "ade.puspita": "Ade", "cbt.admin": "CBT-Admin",
-    "shaiful.baldy": "Baldy", "muhammad.geraldi": "Gerald",
-    "achmad.rifandi": "Fandi", "sulistia": "CBT-Tia",
-    "aliryodan": "CBT-Ali", "rifyal.tumber": "Rifyal",
+    "client-cre-mic-opc":   "API-DTM",
+    "client-cre-ptrmtt-cp": "API-DTM",
+    "api-dtm":              "API-DTM",
+    "farras":               "Farras",
+    "firda":                "Firda",
+    "rida.manora":          "Rida",
+    "rida":                 "Rida",
+    "meijika":              "Meiji",
+    "meiji":                "Meiji",
+    "veronica":             "Vero",
+    "vero":                 "Vero",
+    "selvy":                "Selvy",
+    "ade.puspita":          "Ade",
+    "ade":                  "Ade",
+    "shaiful.baldy":        "Baldy",
+    "baldy":                "Baldy",
+    "muhammad.geraldi":     "Gerald",
+    "geraldi":              "Gerald",
+    "gerald":               "Gerald",
+    "vial":                 "Vial",
+    "achmad.vial":          "Vial",
 }
 
 _WHOLESALERS = frozenset([
@@ -600,62 +616,71 @@ button[data-testid="baseButton-header"],#MainMenu,footer,header{display:none!imp
   font-weight:600!important;color:var(--t4)!important;text-transform:uppercase!important;}
 [data-testid="stDataFrame"] td{font-size:.71rem!important;color:var(--t2)!important;}
 /* AGENT CARDS */
-.p2-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:18px;margin-bottom:28px;}
-.p2-card{background:#fff;border:1px solid var(--bd);border-radius:16px;overflow:hidden;
-  display:flex;flex-direction:column;transition:box-shadow .22s,transform .22s;cursor:default;}
-.p2-card:hover{transform:translateY(-4px);box-shadow:0 16px 40px -8px rgba(13,148,136,.20);}
-.p2-banner{background:linear-gradient(135deg,#0D9488,#042F2E);padding:20px 18px 16px;
-  display:flex;align-items:center;gap:14px;position:relative;overflow:hidden;}
-.p2-card.oth .p2-banner{background:linear-gradient(135deg,#475569,#1E293B);}
-.p2av{width:54px;height:54px;border-radius:50%;display:flex;align-items:center;justify-content:center;
-  font-family:var(--fd);font-size:.92rem;font-weight:800;color:#fff;
-  background:rgba(255,255,255,.16);border:2.5px solid rgba(255,255,255,.30);flex-shrink:0;z-index:1;}
-.p2av.photo{background:#E2E8F0;padding:0;overflow:hidden;border:2.5px solid rgba(255,255,255,.50);}
+.p2-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:20px;margin-bottom:32px;}
+.p2-card{background:#fff;border:1px solid #D1D9E0;border-radius:20px;overflow:hidden;
+  display:flex;flex-direction:column;
+  transition:box-shadow .25s,transform .25s;cursor:default;
+  box-shadow:0 2px 8px rgba(0,0,0,.07);}
+.p2-card:hover{transform:translateY(-5px);box-shadow:0 20px 48px -8px rgba(13,148,136,.22);}
+.p2-banner{background:linear-gradient(135deg,#0D9488 0%,#064E3B 100%);
+  padding:22px 20px 18px;display:flex;align-items:center;gap:16px;
+  position:relative;overflow:hidden;}
+.p2-banner::after{content:'';position:absolute;right:-20px;top:-20px;width:100px;height:100px;
+  background:rgba(255,255,255,.06);border-radius:50%;}
+.p2-card.oth .p2-banner{background:linear-gradient(135deg,#475569 0%,#1E293B 100%);}
+.p2av{width:60px;height:60px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-family:var(--fd);font-size:1.1rem;font-weight:800;color:#fff;
+  background:rgba(255,255,255,.18);border:3px solid rgba(255,255,255,.35);flex-shrink:0;z-index:1;}
+.p2av.photo{background:#E2E8F0;padding:0;overflow:hidden;border:3px solid rgba(255,255,255,.55);}
 .p2av.photo img{width:100%;height:100%;object-fit:cover;object-position:center 8%;
   transform:scale(1.35);transform-origin:center 20%;border-radius:50%;}
 .p2-bi{flex:1;min-width:0;z-index:1;}
-.p2-name{font-family:var(--fh);font-size:1rem;font-weight:800;color:#fff;line-height:1.2;}
-.p2-role{font-size:.56rem;color:rgba(255,255,255,.60);margin-top:2px;}
-.p2-sh{display:inline-flex;align-items:center;gap:5px;margin-top:8px;
-  background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.20);
-  border-radius:20px;padding:3px 9px;}
+.p2-name{font-family:var(--fh);font-size:1.15rem;font-weight:800;color:#fff;
+  line-height:1.2;letter-spacing:-.3px;}
+.p2-role{font-size:.62rem;color:rgba(255,255,255,.65);margin-top:3px;font-weight:500;}
+.p2-sh{display:inline-flex;align-items:center;gap:5px;margin-top:9px;
+  background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);
+  border-radius:20px;padding:4px 10px;}
 .p2-sh-dot{width:5px;height:5px;border-radius:50%;background:#2DD4BF;}
-.p2-sh-txt{font-size:.55rem;font-weight:600;color:rgba(255,255,255,.90);white-space:nowrap;}
-.p2-body{padding:14px 16px 6px;display:flex;flex-direction:column;flex:1;}
-.p2-slbl{font-size:.52rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;
-  color:var(--t4);margin:10px 0 6px;display:flex;align-items:center;gap:6px;}
-.p2-slbl::after{content:'';flex:1;height:1px;background:#F1F5F9;}
-.p2-mg{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#F1F5F9;
-  border-radius:10px;overflow:hidden;border:1px solid #F1F5F9;}
-.p2-mr{background:#fff;padding:10px 12px 8px;display:flex;flex-direction:column;gap:2px;}
-.p2-mr:hover{background:#F8FDFC;}
-.p2m-top{display:flex;align-items:center;gap:4px;margin-bottom:2px;}
-.p2m-ic{font-size:.7rem;}.p2m-lb{font-size:.5rem;font-weight:700;text-transform:uppercase;
-  letter-spacing:.9px;color:var(--t4);}
-.p2m-v{font-family:var(--fd);font-size:1.15rem;font-weight:800;color:var(--t1);
-  letter-spacing:-.5px;line-height:1;}
-.p2m-h{font-size:.49rem;color:var(--t4);margin-top:1px;}
-.p2-bar{height:3px;background:#EEF2FF;border-radius:10px;overflow:hidden;margin-top:5px;}
+.p2-sh-txt{font-size:.62rem;font-weight:600;color:rgba(255,255,255,.95);white-space:nowrap;}
+.p2-body{padding:16px 18px 8px;display:flex;flex-direction:column;flex:1;}
+.p2-slbl{font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;
+  color:var(--t3);margin:12px 0 8px;display:flex;align-items:center;gap:8px;}
+.p2-slbl::after{content:'';flex:1;height:1px;background:#E8EEF3;}
+.p2-mg{display:grid;grid-template-columns:1fr 1fr;gap:2px;background:#E8EEF3;
+  border-radius:12px;overflow:hidden;border:1px solid #E8EEF3;}
+.p2-mr{background:#fff;padding:12px 14px 10px;display:flex;flex-direction:column;gap:2px;}
+.p2-mr:hover{background:#F0FDF9;}
+.p2m-top{display:flex;align-items:center;gap:5px;margin-bottom:3px;}
+.p2m-ic{font-size:.75rem;}
+.p2m-lb{font-size:.58rem;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--t4);}
+.p2m-v{font-family:var(--fd);font-size:1.3rem;font-weight:800;color:var(--t1);
+  letter-spacing:-.6px;line-height:1;}
+.p2m-h{font-size:.58rem;color:var(--t3);margin-top:2px;font-weight:500;}
+.p2-bar{height:4px;background:#EEF2FF;border-radius:10px;overflow:hidden;margin-top:6px;}
 .p2-bf{height:100%;border-radius:10px;background:linear-gradient(90deg,#0D9488,#2DD4BF);
-  transition:width .6s cubic-bezier(.4,0,.2,1);}
+  transition:width .7s cubic-bezier(.4,0,.2,1);}
 .p2-card.oth .p2-bf{background:linear-gradient(90deg,#94A3B8,#CBD5E1);}
-.p2-ms{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#E0F2FE;
-  border-radius:10px;border:1px solid #BAE6FD;overflow:hidden;margin-top:10px;}
-.p2-card.oth .p2-ms{background:#F1F5F9;border-color:var(--bd);}
-.p2-ml,.p2-mr2{background:#F0F9FF;padding:9px 12px;}
+.p2-ms{display:grid;grid-template-columns:1fr 1fr;gap:2px;
+  background:#BAE6FD;border-radius:12px;border:1px solid #BAE6FD;overflow:hidden;margin-top:12px;}
+.p2-card.oth .p2-ms{background:#E2E8F0;border-color:#CBD5E1;}
+.p2-ml,.p2-mr2{background:#F0F9FF;padding:11px 14px;}
 .p2-card.oth .p2-ml,.p2-card.oth .p2-mr2{background:#F8FAFC;}
 .p2-mr2{text-align:right;}
-.p2-mslb{font-size:.5rem;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#0369A1;}
+.p2-mslb{font-size:.58rem;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#0369A1;}
 .p2-card.oth .p2-mslb{color:var(--t3);}
-.p2-msv{font-family:var(--fd);font-size:1.05rem;font-weight:800;line-height:1.1;margin-top:2px;color:var(--t1);}
-.p2-ft{padding:10px 16px 14px;border-top:1px solid #F1F5F9;background:#FAFBFC;}
-.p2-ftlb{font-size:.5rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--t4);margin-bottom:6px;}
+.p2-msv{font-family:var(--fd);font-size:1.2rem;font-weight:800;line-height:1.1;
+  margin-top:3px;color:var(--t1);}
+.p2-ft{padding:12px 18px 16px;border-top:1px solid #EEF2F7;background:#FAFCFE;}
+.p2-ftlb{font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;
+  color:var(--t4);margin-bottom:7px;}
 .p2-sr{display:flex;align-items:center;justify-content:space-between;gap:8px;
-  background:var(--pl);border:1px solid var(--pm);border-radius:8px;padding:7px 11px;}
+  background:var(--pl);border:1px solid var(--pm);border-radius:10px;padding:8px 12px;}
 .p2-card.oth .p2-sr{background:#F1F5F9;border-color:var(--bd);}
-.p2-sn{font-size:.62rem;font-weight:600;color:var(--p2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;}
-.p2-srn{font-size:.57rem;font-weight:700;color:var(--p);background:#fff;
-  padding:2px 8px;border-radius:12px;border:1px solid var(--pm);flex-shrink:0;}
+.p2-sn{font-size:.68rem;font-weight:600;color:var(--p2);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;flex:1;}
+.p2-srn{font-size:.63rem;font-weight:700;color:var(--p);background:#fff;
+  padding:3px 9px;border-radius:12px;border:1px solid var(--pm);flex-shrink:0;}
 </style>
 """
 st.markdown(_CSS, unsafe_allow_html=True)
@@ -1317,7 +1342,6 @@ if uploaded_files and "df_raw" in st.session_state:
     with tab5:
         if "Agent" in df_view.columns and "Invoice No" in df_view.columns and "Total Room Night" in df_view.columns:
             dfa = df_view.copy()
-            # Map agent name
             dfa["Agent"] = (dfa["Agent"].astype(str).str.strip().str.lower()
                             .map(lambda x: AGENT_MAP.get(x, x.title())))
             _null_ag = {"nan","none","","nat","<na>","n/a","null","-"}
@@ -1326,8 +1350,10 @@ if uploaded_files and "df_raw" in st.session_state:
             def _pic_group(name):
                 nu = str(name).strip()
                 for p in KNOWN_PICS:
-                    if p.lower() == nu.lower(): return p
-                return nu
+                    if p.lower() == nu.lower():
+                        return p
+                return "Other"
+
             dfa["PIC"] = dfa["Agent"].apply(_pic_group)
 
             _n_months = 1
@@ -1337,9 +1363,9 @@ if uploaded_files and "df_raw" in st.session_state:
             _ccol = ("Normalized_Inv_To" if "Normalized_Inv_To" in dfa.columns
                      else ("Invoice To" if "Invoice To" in dfa.columns else None))
 
-            _known = [p for p in KNOWN_PICS if p in dfa["PIC"].unique()]
-            _other = sorted([p for p in dfa["PIC"].unique() if p not in KNOWN_PICS])
-            _order = _known + _other
+            _known_with_data = [p for p in KNOWN_PICS if p in dfa["PIC"].unique()]
+            _has_other = "Other" in dfa["PIC"].unique()
+            _order = _known_with_data + (["Other"] if _has_other else [])
 
             pic_data = {}
             for _pic in _order:
@@ -1347,15 +1373,15 @@ if uploaded_files and "df_raw" in st.session_state:
                 if _s.empty: continue
                 _iu = int(_s["Invoice No"].nunique())
                 _rn = float(_s["Total Room Night"].sum())
-                _sa = float(_s["Sales AR"].fillna(0).astype(float).sum()) if "Sales AR" in _s.columns else None
-                _pr = float(_s["Profit"].fillna(0).astype(float).sum())   if "Profit"   in _s.columns else None
+                _sa = float(_s["Sales AR"].fillna(0).astype(float).sum()) if "Sales AR" in _s.columns else 0.0
+                _pr = float(_s["Profit"].fillna(0).astype(float).sum())   if "Profit"   in _s.columns else 0.0
                 _avg_pm = None
                 if "Profit" in _s.columns and "Sales AR" in _s.columns:
                     sf = pd.to_numeric(_s["Sales AR"], errors="coerce").fillna(0)
                     pf = pd.to_numeric(_s["Profit"],   errors="coerce").fillna(0)
                     mm = sf != 0
                     if mm.any(): _avg_pm = float((pf[mm]/sf[mm]*100).mean())
-                _top_s = "—"; _top_rn = 0
+                _top_s = "\u2014"; _top_rn = 0
                 if "Supplier_Name" in _s.columns:
                     _srn = (_s.groupby("Supplier_Name")["Total Room Night"].sum()
                             .sort_values(ascending=False))
@@ -1365,118 +1391,150 @@ if uploaded_files and "df_raw" in st.session_state:
                 _art = float(dfa["Total Room Night"].sum())
                 pic_data[_pic] = {
                     "iu":_iu,"rn":_rn,"sa":_sa,"pr":_pr,
-                    "avg_inv":_iu/_n_months,"avg_rn":_rn/_iu if _iu>0 else 0,
-                    "avg_sa":(_sa/_iu if _sa and _iu>0 else None),
-                    "avg_pr":(_pr/_iu if _pr and _iu>0 else None),
-                    "avg_pm":_avg_pm,"co":(int(_s[_ccol].dropna().nunique()) if _ccol else 0),
-                    "top_s":_top_s,"top_rn":_top_rn,
-                    "ip":(_iu/_ait*100 if _ait>0 else 0),
-                    "rp":(_rn/_art*100 if _art>0 else 0),
+                    "avg_inv":_iu/_n_months,
+                    "avg_rn":_rn/_iu if _iu > 0 else 0,
+                    "avg_sa":_sa/_iu if _iu > 0 else 0,
+                    "avg_pr":_pr/_iu if _iu > 0 else 0,
+                    "avg_pm":_avg_pm,
+                    "co":(int(_s[_ccol].dropna().nunique()) if _ccol else 0),
+                    "top_s":_top_s, "top_rn":_top_rn,
+                    "ip":(_iu/_ait*100 if _ait > 0 else 0),
+                    "rp":(_rn/_art*100 if _art > 0 else 0),
                 }
 
             def _ini(n):
-                p = n.split()
-                if len(p)>=2: return (p[0][0]+p[1][0]).upper()
-                return n[:2].upper() if len(n)>=2 else n.upper()
+                p = str(n).split()
+                if len(p) >= 2: return (p[0][0]+p[1][0]).upper()
+                return str(n)[:2].upper() if len(str(n)) >= 2 else str(n).upper()
+
+            def _bar_html(pct):
+                w = min(float(pct), 100)
+                return '<div class="p2-bar"><div class="p2-bf" style="width:' + f"{w:.1f}" + '%;"></div></div>'
+
+            def _mrow_html(icon, label, val, hint="", bp=None):
+                bh = _bar_html(bp) if bp is not None else ""
+                hh = '<div class="p2m-h">' + hint + '</div>' if hint else ""
+                return (
+                    '<div class="p2-mr">'
+                    '<div class="p2m-top">'
+                    '<span class="p2m-ic">' + icon + '</span>'
+                    '<span class="p2m-lb">' + label + '</span>'
+                    '</div>'
+                    '<div class="p2m-v">' + val + '</div>'
+                    + hh + bh + '</div>'
+                )
 
             def _build_card(pic, d):
-                is_other = pic not in KNOWN_PICS
+                is_other = (pic == "Other")
                 ini  = _ini(pic)
                 cls  = "p2-card oth" if is_other else "p2-card"
-                sa_s = compact_num(d["sa"]) if d["sa"] is not None else "—"
-                pr_s = compact_num(d["pr"]) if d["pr"] is not None else "—"
-                as_s = compact_num(d["avg_sa"]) if d.get("avg_sa") is not None else "—"
-                ap_s = compact_num(d["avg_pr"]) if d.get("avg_pr") is not None else "—"
-                pm_raw = None
-                pm_s   = "—"
+                sa_s = compact_num(d["sa"]) if d["sa"] else "\u2014"
+                pr_s = compact_num(d["pr"]) if d["pr"] else "\u2014"
+                as_s = compact_num(d["avg_sa"]) if d["avg_sa"] else "\u2014"
+                ap_s = compact_num(d["avg_pr"]) if d["avg_pr"] else "\u2014"
+                pm_raw = None; pm_s = "\u2014"
                 if d["sa"] and d["pr"] and d["sa"] > 0:
                     pm_raw = d["pr"] / d["sa"] * 100
                     pm_s   = f"{pm_raw:.1f}%"
-                apm_s = f"{d['avg_pm']:.1f}%" if d.get("avg_pm") is not None else "—"
+                apm_s = f"{d['avg_pm']:.1f}%" if d.get("avg_pm") is not None else "\u2014"
                 photo = _load_avatar_b64(pic) if not is_other else ""
-                av    = (f'<div class="p2av photo"><img src="{photo}" alt="{pic}"/></div>'
-                         if photo else f'<div class="p2av">{ini}</div>')
-                sh = (f'<div class="p2-sh"><span class="p2-sh-dot"></span>'
-                      f'<span class="p2-sh-txt">{d["ip"]:.1f}% inv · {d["rp"]:.1f}% RN</span></div>')
-
-                def _bar(pct):
-                    w = min(float(pct), 100)
-                    return f'<div class="p2-bar"><div class="p2-bf" style="width:{w:.1f}%;"></div></div>'
-
-                def _mrow(icon, label, val, hint="", bp=None):
-                    bh = _bar(bp) if bp is not None else ""
-                    hh = f'<div class="p2m-h">{hint}</div>' if hint else ""
-                    return (f'<div class="p2-mr"><div class="p2m-top">'
-                            f'<span class="p2m-ic">{icon}</span>'
-                            f'<span class="p2m-lb">{label}</span></div>'
-                            f'<div class="p2m-v">{val}</div>{hh}{bh}</div>')
-
+                if photo:
+                    av = '<div class="p2av photo"><img src="' + photo + '" alt="' + pic + '"/></div>'
+                else:
+                    av = '<div class="p2av">' + ini + '</div>'
+                sh_txt = f'{d["ip"]:.1f}% inv \u00b7 {d["rp"]:.1f}% RN'
+                sh = ('<div class="p2-sh">'
+                      '<span class="p2-sh-dot"></span>'
+                      '<span class="p2-sh-txt">' + sh_txt + '</span>'
+                      '</div>')
                 pm_c  = "#059669" if (pm_raw is not None and pm_raw  >= 0) else "#DC2626"
                 apm_c = "#059669" if (d.get("avg_pm") is not None and d["avg_pm"] >= 0) else "#DC2626"
 
-                h = (
-                    f'<div class="{cls}">'
-                    f'<div class="p2-banner">{av}'
-                    f'<div class="p2-bi"><div class="p2-name">{pic}</div>'
-                    f'<div class="p2-role">Hotel Bookers · MTT</div>{sh}</div></div>'
-                    f'<div class="p2-body">'
-                    f'<div class="p2-slbl">📋 Volume</div>'
-                    f'<div class="p2-mg">'
-                    + _mrow("🧾","Invoice",f'{d["iu"]:,}',f'avg {d["avg_inv"]:.1f}/bln',d["ip"])
-                    + _mrow("🌙","Room Night",compact_num(d["rn"]),f'avg {d["avg_rn"]:.1f} RN/inv',d["rp"])
-                    + f'</div>'
-                    f'<div class="p2-slbl">💰 Finansial</div>'
-                    f'<div class="p2-mg">'
-                    + _mrow("📦","Sales AR",sa_s,f'avg {as_s}/inv')
-                    + _mrow("💹","Profit",pr_s,f'avg {ap_s}/inv')
-                    + f'</div>'
-                    f'<div class="p2-ms">'
-                    f'<div class="p2-ml"><div class="p2-mslb">Profit Margin</div>'
-                    f'<div class="p2-msv" style="color:{pm_c};">{pm_s}</div>'
-                    f'<div style="margin-top:6px;padding-top:6px;border-top:1px dashed rgba(13,148,136,.2);">'
-                    f'<div class="p2-mslb" style="margin-bottom:2px;">Avg PM</div>'
-                    f'<div style="font-family:\'Sora\',sans-serif;font-size:.78rem;font-weight:700;color:{apm_c};">{apm_s}</div>'
-                    f'</div></div>'
-                    f'<div class="p2-mr2"><div class="p2-mslb">Companies</div>'
-                    f'<div class="p2-msv">{d["co"]:,}</div></div></div>'
-                    f'</div>'
-                    f'<div class="p2-ft"><div class="p2-ftlb">🏨 Supplier Preference</div>'
+                top_block = (
+                    '<div class="' + cls + '">'
+                    '<div class="p2-banner">'
+                    + av +
+                    '<div class="p2-bi">'
+                    '<div class="p2-name">' + pic + '</div>'
+                    '<div class="p2-role">Hotel Bookers \u00b7 MTT</div>'
+                    + sh +
+                    '</div></div>'
                 )
-                if d["top_s"] != "—":
-                    sh2 = d["top_s"][:28]+"…" if len(d["top_s"])>28 else d["top_s"]
-                    h += (f'<div class="p2-sr"><span class="p2-sn">{sh2}</span>'
-                          f'<span class="p2-srn">{d["top_rn"]:,} RN</span></div>')
+                body_block = (
+                    '<div class="p2-body">'
+                    '<div class="p2-slbl">&#x1F4CB; Volume</div>'
+                    '<div class="p2-mg">'
+                    + _mrow_html("\U0001F9FE","Invoice",f'{d["iu"]:,}',f'avg {d["avg_inv"]:.1f}/bln',d["ip"])
+                    + _mrow_html("\U0001F319","Room Night",compact_num(d["rn"]),f'avg {d["avg_rn"]:.1f}/inv',d["rp"])
+                    + '</div>'
+                    '<div class="p2-slbl">&#x1F4B0; Finansial</div>'
+                    '<div class="p2-mg">'
+                    + _mrow_html("\U0001F4E6","Sales AR",sa_s,"avg " + as_s + "/inv")
+                    + _mrow_html("\U0001F4C8","Profit",pr_s,"avg " + ap_s + "/inv")
+                    + '</div>'
+                    '<div class="p2-ms">'
+                    '<div class="p2-ml">'
+                    '<div class="p2-mslb">Profit Margin</div>'
+                    '<div class="p2-msv" style="color:' + pm_c + ';">' + pm_s + '</div>'
+                    '<div style="margin-top:7px;padding-top:7px;border-top:1px dashed rgba(13,148,136,.22);">'
+                    '<div class="p2-mslb" style="margin-bottom:2px;">Avg PM</div>'
+                    '<div style="font-family:\'Sora\',sans-serif;font-size:.82rem;font-weight:700;color:' + apm_c + ';">' + apm_s + '</div>'
+                    '</div></div>'
+                    '<div class="p2-mr2">'
+                    '<div class="p2-mslb">Companies</div>'
+                    '<div class="p2-msv">' + f'{d["co"]:,}' + '</div>'
+                    '</div></div>'
+                    '</div>'
+                )
+                if d["top_s"] != "\u2014":
+                    sh2 = d["top_s"][:26]+"…" if len(d["top_s"]) > 26 else d["top_s"]
+                    ft_inner = ('<div class="p2-sr">'
+                                '<span class="p2-sn">' + sh2 + '</span>'
+                                '<span class="p2-srn">' + f'{d["top_rn"]:,}' + ' RN</span>'
+                                '</div>')
                 else:
-                    h += '<span style="font-size:.58rem;color:#94A3B8;font-style:italic;">—</span>'
-                h += '</div></div>'
-                return h
+                    ft_inner = '<span style="font-size:.65rem;color:#94A3B8;font-style:italic;">\u2014</span>'
 
-            # Sort by Sales AR desc
-            _sorted_order = sorted(
-                [p for p in _order if p in pic_data],
-                key=lambda p: pic_data[p]["sa"] if pic_data[p]["sa"] is not None else 0,
+                footer_block = (
+                    '<div class="p2-ft">'
+                    '<div class="p2-ftlb">&#x1F3E8; Supplier Preference</div>'
+                    + ft_inner +
+                    '</div>'
+                )
+                return top_block + body_block + footer_block + '</div>'
+
+            _known_sorted = sorted(
+                _known_with_data,
+                key=lambda p: pic_data[p]["sa"] if p in pic_data else 0,
                 reverse=True)
+            _final_order = _known_sorted + (["Other"] if _has_other and "Other" in pic_data else [])
 
             gsec("Scorecard PIC Agent","🏅")
             st.markdown(
                 '<div class="p2-grid">'
-                + "".join(_build_card(p, pic_data[p]) for p in _sorted_order)
+                + "".join(_build_card(p, pic_data[p]) for p in _final_order)
                 + '</div>',
                 unsafe_allow_html=True)
 
             gsec("Tabel Ringkasan Scorecard","📋")
             _rows = []
-            for p in _sorted_order:
+            for p in _final_order:
                 d = pic_data[p]
                 _sa2 = d["sa"] or 0; _pr2 = d["pr"] or 0
                 _rows.append({
-                    "PIC": p, "Invoice": d["iu"], "Avg Inv/Bln": round(d["avg_inv"],1),
-                    "Room Night": int(d["rn"]), "Avg RN/Inv": round(d["avg_rn"],1),
-                    "Sales AR": _sa2, "Avg Sales/Inv": d["avg_sa"] or 0,
-                    "Profit": _pr2, "Avg Profit/Inv": d["avg_pr"] or 0,
-                    "Profit Margin": f"{_pr2/_sa2*100:.1f}%" if _sa2>0 else "—",
+                    "PIC": p,
+                    "Invoice": d["iu"],
+                    "Avg Inv/Bln": round(d["avg_inv"],1),
+                    "Room Night": int(d["rn"]),
+                    "Avg RN/Inv": round(d["avg_rn"],1),
+                    "Sales AR": _sa2,
+                    "Avg Sales/Inv": round(d["avg_sa"],0),
+                    "Profit": _pr2,
+                    "Avg Profit/Inv": round(d["avg_pr"],0),
+                    "Profit Margin": f"{_pr2/_sa2*100:.1f}%" if _sa2 > 0 else "\u2014",
                     "Companies": d["co"],
-                    "% Inv": round(d["ip"],1), "% RN": round(d["rp"],1),
+                    "% Inv": round(d["ip"],1),
+                    "% RN": round(d["rp"],1),
                     "Top Supplier": d["top_s"],
                 })
             _df_sc = pd.DataFrame(_rows)
