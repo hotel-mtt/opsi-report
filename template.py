@@ -1357,7 +1357,7 @@ if uploaded_files and "df_raw" in st.session_state:
                               ("Peak",f'{pk["_ml"]} · {compact_num(int(pk["Inv"]))}'),
                               ("Avg/bln",compact_num(int(_ti2["Inv"].mean())))])
                     + '</div>', unsafe_allow_html=True)
-                st.plotly_chart(theme(_linec(_ti2,"_ml","Inv")), use_container_width=True)
+                st.plotly_chart(theme(_linec(_ti2,"_ml","Inv")), width="stretch")
             with c2:
                 if has_rn:
                     pk2 = _tr2s.loc[_tr2s["Total Room Night"].idxmax()]
@@ -1368,7 +1368,7 @@ if uploaded_files and "df_raw" in st.session_state:
                                   ("Peak",f'{pk2["_ml"]} · {compact_num(int(pk2["Total Room Night"]))}'),
                                   ("Avg/bln",compact_num(int(_tr2s["Total Room Night"].mean())))])
                         + '</div>', unsafe_allow_html=True)
-                    st.plotly_chart(theme(_linec(_tr2s,"_ml","Total Room Night")), use_container_width=True)
+                    st.plotly_chart(theme(_linec(_tr2s,"_ml","Total Room Night")), width="stretch")
                 else:
                     st.info("Kolom Total Room Night tidak tersedia.")
 
@@ -1384,7 +1384,7 @@ if uploaded_files and "df_raw" in st.session_state:
                         + _mini([("Total",compact_num(_pr_s["Profit"].sum())),
                                   ("Margin avg",f"{_pmv:.1f}%" if _pmv else "—")])
                         + '</div>', unsafe_allow_html=True)
-                    st.plotly_chart(theme(_linec(_pr_s,"_ml","Profit",color="#134E4A",fill="rgba(19,78,74,.07)")), use_container_width=True)
+                    st.plotly_chart(theme(_linec(_pr_s,"_ml","Profit",color="#134E4A",fill="rgba(19,78,74,.07)")), width="stretch")
                 else:
                     st.info("Kolom Profit tidak tersedia.")
             with c4:
@@ -1398,7 +1398,7 @@ if uploaded_files and "df_raw" in st.session_state:
                             '<div style="font-size:.72rem;font-weight:700;color:#0F172A;margin-bottom:3px;">🗺️ Tren Kota Unik</div>'
                             + _mini([("Max",str(int(_cy_s["Kota"].max()))),("Avg/bln",str(int(_cy_s["Kota"].mean())))])
                             + '</div>', unsafe_allow_html=True)
-                        st.plotly_chart(theme(_linec(_cy_s,"_ml","Kota",color="#134E4A",fill="rgba(19,78,74,.07)")), use_container_width=True)
+                        st.plotly_chart(theme(_linec(_cy_s,"_ml","Kota",color="#134E4A",fill="rgba(19,78,74,.07)")), width="stretch")
                 else:
                     st.info("Kolom Hotel_City tidak tersedia.")
 
@@ -1504,7 +1504,7 @@ if uploaded_files and "df_raw" in st.session_state:
         with _dc:
             st.download_button("⬇ Download CSV",
                                df_view.to_csv(index=False).encode("utf-8"),
-                               "hotel_report.csv","text/csv",width="stretch")
+                               "hotel_report.csv","text/csv",use_container_width=True)
         with _ec:
             _ob = io.BytesIO()
             with pd.ExcelWriter(_ob, engine="xlsxwriter") as _w:
@@ -1512,7 +1512,7 @@ if uploaded_files and "df_raw" in st.session_state:
             st.download_button("⬇ Download Excel", _ob.getvalue(),
                                "hotel_report.xlsx",
                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               width="stretch")
+                               use_container_width=True)
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 2 — TREN INVOICE
@@ -1532,7 +1532,7 @@ if uploaded_files and "df_raw" in st.session_state:
                     hovertemplate="<b>%{x}</b><br>Invoice: <b>%{y:,.0f}</b><extra></extra>"))
                 fig.update_layout(xaxis_title="",yaxis_title="Invoice Unik",
                                   hovermode="x unified",height=320)
-                st.plotly_chart(theme(fig), use_container_width=True)
+                st.plotly_chart(theme(fig), width="stretch")
             with cb:
                 gsec("Ringkasan Bulanan","📋")
                 if tr2c is not None:
@@ -1544,8 +1544,8 @@ if uploaded_files and "df_raw" in st.session_state:
                 _sty_m = _m.style.format({c: "{:,.0f}" for c in _num_cols_m})
                 if "Invoice Unik" in _num_cols_m:
                     _sty_m = _sty_m.apply(
-                        lambda s: [f"background-color: rgba(88,28,220,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s]
-                        if s.max() > s.min() else [""] * len(s),
+                        lambda s: (lambda sn: [f"background-color: rgba(88,28,220,{0.05 + 0.55*(v-sn.min())/(sn.max()-sn.min()+1e-9):.2f}); color: #0F172A" for v in sn]
+                        if sn.max() > sn.min() else [""] * len(s))(pd.to_numeric(s, errors="coerce").fillna(0)),
                         subset=["Invoice Unik"])
                 st.dataframe(_sty_m, width="stretch", height=320)
             gsec("Volume Invoice per Bulan","📊")
@@ -1555,7 +1555,7 @@ if uploaded_files and "df_raw" in st.session_state:
                                textfont=dict(size=11,color="#8898AA"),
                                marker_line_width=0, marker_cornerradius=4, cliponaxis=False)
             fig2.update_layout(coloraxis_showscale=False, height=290, xaxis_title="", yaxis_title="")
-            st.plotly_chart(theme(fig2), use_container_width=True)
+            st.plotly_chart(theme(fig2), width="stretch")
         else:
             _av = ", ".join(f"`{c}`" for c in df_view.columns[:20])
             st.warning(f"⚠️ Kolom **Issued Date** atau **Invoice No** tidak ditemukan di file ini.\n\nKolom tersedia (20 pertama): {_av}\n\n💡 Periksa panel **🔍 Debug Kolom** di sidebar untuk detail lengkap.")
@@ -1576,7 +1576,7 @@ if uploaded_files and "df_raw" in st.session_state:
                                    marker=dict(line=dict(color="rgba(6,8,24,.8)",width=2)),
                                    hovertemplate="<b>%{label}</b><br>Room Night: %{value:,.0f}<br>%{percent}<extra></extra>")
                 fig3.update_layout(height=360, legend=dict(orientation="v",yanchor="middle",y=.5,xanchor="left",x=1.02))
-                st.plotly_chart(theme(fig3), use_container_width=True)
+                st.plotly_chart(theme(fig3), width="stretch")
             with cb:
                 gsec("Top Supplier","📊")
                 fig3b = px.bar(ss3.head(10), x="Total Room Night", y="Supplier_Name",
@@ -1587,12 +1587,12 @@ if uploaded_files and "df_raw" in st.session_state:
                                     marker_line_width=0, marker_cornerradius=4, cliponaxis=False)
                 fig3b.update_layout(yaxis=dict(categoryorder="total ascending"),
                                     coloraxis_showscale=False, height=380, xaxis_title="", yaxis_title="")
-                st.plotly_chart(theme(fig3b), use_container_width=True)
+                st.plotly_chart(theme(fig3b), width="stretch")
             gsec("Tabel Lengkap Supplier")
             st.dataframe(
                 ss3.reset_index(drop=True)
                 .style.format({"Total Room Night":"{:,.0f}"})
-                .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s] if pd.to_numeric(s, errors='coerce').notna().any() else [""] * len(s), subset=["Total Room Night"]),
+                .apply(lambda s: (lambda sn: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-sn.min())/(sn.max()-sn.min()+1e-9):.2f}); color: #0F172A" for v in sn] if sn.max() > sn.min() else [""] * len(s))(pd.to_numeric(s, errors='coerce').fillna(0)), subset=["Total Room Night"]),
                 width="stretch")
         else:
             st.warning("⚠️ Kolom **Supplier_Name** atau **Total Room Night** tidak tersedia.\n\n💡 Cek debug panel di sidebar — pastikan file memiliki kolom Supplier Name dan Room/Night.")
@@ -1613,13 +1613,13 @@ if uploaded_files and "df_raw" in st.session_state:
                                    marker=dict(line=dict(color="rgba(6,8,24,.8)",width=2)),
                                    hovertemplate="<b>%{label}</b><br>Room Night: %{value:,.0f}<br>%{percent}<extra></extra>")
                 fig4.update_layout(height=360)
-                st.plotly_chart(theme(fig4), use_container_width=True)
+                st.plotly_chart(theme(fig4), width="stretch")
             with cb:
                 gsec("Tabel Product Type","📋")
                 st.dataframe(
                     d4.reset_index(drop=True)
                     .style.format({"Total Room Night":"{:,.0f}"})
-                    .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s] if pd.to_numeric(s, errors='coerce').notna().any() else [""] * len(s), subset=["Total Room Night"]),
+                    .apply(lambda s: (lambda sn: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-sn.min())/(sn.max()-sn.min()+1e-9):.2f}); color: #0F172A" for v in sn] if sn.max() > sn.min() else [""] * len(s))(pd.to_numeric(s, errors='coerce').fillna(0)), subset=["Total Room Night"]),
                     width="stretch", height=360)
         else:
             st.warning("⚠️ Kolom **Product Type** atau **Total Room Night** tidak tersedia.\n\n💡 Cek debug panel di sidebar.")
@@ -1631,7 +1631,7 @@ if uploaded_files and "df_raw" in st.session_state:
         if "Agent" in df_view.columns and "Invoice No" in df_view.columns and "Total Room Night" in df_view.columns:
             dfa = df_view.copy()
             dfa["Agent"] = (dfa["Agent"].astype(str).str.strip().str.lower()
-                            .map(lambda x: AGENT_MAP.get(x, x.title())))
+                            .map(lambda x: AGENT_MAP.get(x, x.title()), na_action='ignore'))
             _null_ag = {"nan","none","","nat","<na>","n/a","null","-"}
             dfa = dfa[~dfa["Agent"].str.lower().isin(_null_ag)]
 
@@ -1835,7 +1835,7 @@ if uploaded_files and "df_raw" in st.session_state:
             st.download_button("⬇ Download Scorecard", _ob_sc.getvalue(),
                                "scorecard_agent.xlsx",
                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               width="stretch")
+                               use_container_width=True)
         else:
             _av2 = ", ".join(f"`{c}`" for c in df_view.columns[:20])
             st.warning(f"⚠️ Kolom **Agent**, **Invoice No**, atau **Total Room Night** tidak ditemukan.\n\nKolom tersedia: {_av2}\n\n💡 Cek debug panel di sidebar — tambahkan mapping alias jika nama kolom berbeda.")
@@ -1863,20 +1863,20 @@ if uploaded_files and "df_raw" in st.session_state:
                                  coloraxis_showscale=False, height=460,
                                  xaxis_title="", yaxis_title="",
                                  margin=dict(l=8,r=80,t=30,b=8))
-                st.plotly_chart(theme(fh), use_container_width=True)
+                st.plotly_chart(theme(fh), width="stretch")
             with cb:
                 gsec("Tabel Hotel PTM","📋")
                 st.dataframe(
                     dfh.head(20).reset_index(drop=True)
                     .style.format({"Total Room Night":"{:,.0f}"})
-                    .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s] if pd.to_numeric(s, errors='coerce').notna().any() else [""] * len(s), subset=["Total Room Night"]),
+                    .apply(lambda s: (lambda sn: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-sn.min())/(sn.max()-sn.min()+1e-9):.2f}); color: #0F172A" for v in sn] if sn.max() > sn.min() else [""] * len(s))(pd.to_numeric(s, errors='coerce').fillna(0)), subset=["Total Room Night"]),
                     width="stretch", height=400)
                 _ob3 = io.BytesIO()
                 with pd.ExcelWriter(_ob3, engine="xlsxwriter") as _w:
                     dfh.to_excel(_w, index=False, sheet_name="Hotel_PTM")
                 st.download_button("⬇ Download", _ob3.getvalue(), "hotel_ptm.xlsx",
                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                   width="stretch")
+                                   use_container_width=True)
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 7 — KATEGORI SUPPLIER
@@ -1894,13 +1894,13 @@ if uploaded_files and "df_raw" in st.session_state:
                                   marker=dict(line=dict(color="rgba(6,8,24,.8)",width=2)),
                                   hovertemplate="<b>%{label}</b><br>Room Night: %{value:,.0f}<extra></extra>")
                 fc7.update_layout(height=380)
-                st.plotly_chart(theme(fc7), use_container_width=True)
+                st.plotly_chart(theme(fc7), width="stretch")
             with cb:
                 gsec("Tabel Kategori","📋")
                 st.dataframe(
                     cs7.reset_index(drop=True)
                     .style.format({"Total Room Night":"{:,.0f}"})
-                    .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s] if pd.to_numeric(s, errors='coerce').notna().any() else [""] * len(s), subset=["Total Room Night"]),
+                    .apply(lambda s: (lambda sn: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-sn.min())/(sn.max()-sn.min()+1e-9):.2f}); color: #0F172A" for v in sn] if sn.max() > sn.min() else [""] * len(s))(pd.to_numeric(s, errors='coerce').fillna(0)), subset=["Total Room Night"]),
                     width="stretch", height=380)
         else:
             st.warning("⚠️ Kolom **Supplier_Category** atau **Total Room Night** tidak tersedia.\n\n💡 Cek debug panel di sidebar. Kolom ini otomatis dibuat saat Sync Data berhasil.")
@@ -1983,7 +1983,7 @@ if uploaded_files and "df_raw" in st.session_state:
                     yaxis=dict(categoryorder="total ascending", automargin=True),
                     coloraxis_showscale=False, height=max(380, _top_n * 22),
                     xaxis_title="", yaxis_title="", margin=dict(l=4, r=80, t=20, b=8))
-                st.plotly_chart(theme(fb8), use_container_width=True)
+                st.plotly_chart(theme(fb8), width="stretch")
 
             if has_sa8:
                 with cb8:
@@ -2002,7 +2002,7 @@ if uploaded_files and "df_raw" in st.session_state:
                         yaxis=dict(categoryorder="total ascending", automargin=True),
                         coloraxis_showscale=False, height=max(380, _top_n * 22),
                         xaxis_title="", yaxis_title="", margin=dict(l=4, r=80, t=20, b=8))
-                    st.plotly_chart(theme(fb8r), use_container_width=True)
+                    st.plotly_chart(theme(fb8r), width="stretch")
 
             # ── Search & Tabel lengkap ────────────────────────────────────────
             gsec("Tabel Lengkap Perusahaan", "📋")
@@ -2022,13 +2022,13 @@ if uploaded_files and "df_raw" in st.session_state:
             _sty8 = _tbl8.reset_index(drop=True).style.format({c: "{:,.0f}" for c in _num_cols8})
             if "Total Invoice" in _num_cols8 and len(_tbl8) > 1:
                 _sty8 = _sty8.apply(
-                    lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color:#0F172A"
-                               for v in s] if s.max() > s.min() else [""] * len(s),
+                    lambda s: (lambda sn: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-sn.min())/(sn.max()-sn.min()+1e-9):.2f}); color:#0F172A"
+                               for v in sn] if sn.max() > sn.min() else [""] * len(s))(pd.to_numeric(s, errors="coerce").fillna(0)),
                     subset=["Total Invoice"])
             if has_sa8 and "Sales AR" in _num_cols8 and len(_tbl8) > 1:
                 _sty8 = _sty8.apply(
-                    lambda s: [f"background-color: rgba(19,78,74,{0.04 + 0.45*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color:#0F172A"
-                               for v in s] if s.max() > s.min() else [""] * len(s),
+                    lambda s: (lambda sn: [f"background-color: rgba(19,78,74,{0.04 + 0.45*(v-sn.min())/(sn.max()-sn.min()+1e-9):.2f}); color:#0F172A"
+                               for v in sn] if sn.max() > sn.min() else [""] * len(s))(pd.to_numeric(s, errors="coerce").fillna(0)),
                     subset=["Sales AR"])
 
             st.dataframe(_sty8, width="stretch", height=500)
