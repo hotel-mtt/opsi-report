@@ -2,45 +2,26 @@
 # requirements.txt — Hotel Intelligence v10.0
 # Rifyal Tumber · MTT · 2025
 # ============================================================
-# Install:
-#   pip install -r requirements.txt
-#
-# Untuk Streamlit Community Cloud, letakkan file ini
-# di root folder repo (sejajar dengan join_opsifin_v10.py)
+# Install: pip install -r requirements.txt
+# Letakkan sejajar dengan template.py di root repo
 # ============================================================
 
-# ── Core dashboard ──────────────────────────────────────────
-streamlit>=1.35.0
+streamlit>=1.38.0
 
-# ── Data processing ─────────────────────────────────────────
 pandas>=2.1.0
 numpy>=1.26.0
-
-# ── Visualisasi ─────────────────────────────────────────────
 plotly>=5.18.0
-
-# ── HTTP / GDrive fetch ─────────────────────────────────────
 requests>=2.31.0
 
-# ── Excel reader (wajib) ────────────────────────────────────
-# openpyxl = fallback engine (selalu diperlukan)
+# Excel reader (wajib - fallback engine)
 openpyxl>=3.1.2
 
 # Excel writer untuk download button
 xlsxwriter>=3.1.0
 
-# ── Excel reader CEPAT (baru di v10) ────────────────────────
-# python-calamine: 3-8x lebih cepat dari openpyxl
-# Jika tidak bisa diinstall (misal hosting lama),
-# app tetap jalan — otomatis fallback ke openpyxl
+# Excel reader CEPAT - 3-8x lebih cepat (v10 baru)
+# Jika tidak bisa install, app auto-fallback ke openpyxl
 python-calamine>=0.5.0
 
-# ── Parquet cache (baru di v10) ─────────────────────────────
-# pyarrow: diperlukan untuk pd.read_parquet / to_parquet
-# Tanpa ini cache Parquet tidak aktif (app tetap jalan)
+# Parquet cache - instant load file yang sama (v10 baru)
 pyarrow>=14.0.0
-
-# ── Opsional: gradient warna di tabel ───────────────────────
-# Diperlukan oleh pandas Styler .background_gradient()
-# Sudah diganti manual di v10.0 — tidak wajib lagi
-# matplotlib>=3.7.0
