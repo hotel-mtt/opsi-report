@@ -42,7 +42,8 @@ DROP_SET = frozenset([
     "No", "Branch", "Customer Type", "Customer Name", "Customer Code",
     "PNR", "Base Fare", "Airlines", "Class", "Route",
     "Departure Date", "Departure Time", "Arrival Date", "Arrival Time",
-    "NTA", "Airline Code", "Flight No", "Hotel Address", "Hotel Group Chain",
+    "NTA", "Airline Code", "Flight No", "Hotel Address",
+    # "Hotel Group Chain" TIDAK di-drop — dipakai untuk Hotel_Chain mapping
     "Description", "Due Date", "Group Chain", "Source Reference", "Sales Net",
     "Title", "Remark 1", "Remark 2", "Remark 3", "Remark 4", "Remark 5",
     "Remark 6", "Remark 7", "Remark 8", "Remark 9", "Remark 10",
@@ -53,6 +54,73 @@ DROP_SET = frozenset([
     "Base Sell", "Currency", "Sales Handler", "Remark", "Source Rescode",
     "Booking Code", "Voucher Number", "Room Type", "Profit %",
 ])
+
+# ── Alias kolom: mapping nama alternatif → nama standar yang dipakai kode ──────
+# Opsifin kadang export dengan nama berbeda tergantung versi / template
+COL_ALIASES = {
+    # Tanggal invoice
+    "Issue Date":         "Issued Date",
+    "Invoice Date":       "Issued Date",
+    "Tgl Invoice":        "Issued Date",
+    "Tanggal Invoice":    "Issued Date",
+    "Inv. Date":          "Issued Date",
+    # Invoice No
+    "Invoice Number":     "Invoice No",
+    "No Invoice":         "Invoice No",
+    "No. Invoice":        "Invoice No",
+    "Inv No":             "Invoice No",
+    # Supplier
+    "Supplier":           "Supplier Name",
+    "Nama Supplier":      "Supplier Name",
+    "Vendor":             "Supplier Name",
+    "Vendor Name":        "Supplier Name",
+    # Hotel
+    "Nama Hotel":         "Hotel Name",
+    "Hotel":              "Hotel Name",
+    "Property":           "Hotel Name",
+    "Property Name":      "Hotel Name",
+    "Kota Hotel":         "Hotel City",
+    "City":               "Hotel City",
+    # Room/Night
+    "Rooms":              "Room",
+    "Malam":              "Night",
+    "Nights":             "Night",
+    "Night(s)":           "Night",
+    "Room Night":         "Total Room Night",
+    "Room Nights":        "Total Room Night",
+    "Total RN":           "Total Room Night",
+    "Jumlah Malam":       "Total Room Night",
+    # Sales/Profit
+    "Sales":              "Sales AR",
+    "Total Sales":        "Sales AR",
+    "Revenue":            "Sales AR",
+    "Gross":              "Sales AR",
+    "Profit":             "Profit",
+    "Net Profit":         "Profit",
+    # Agent/PIC
+    "PIC":                "Agent",
+    "Sales Person":       "Agent",
+    "Booker":             "Agent",
+    "Handler":            "Agent",
+    "Handled By":         "Agent",
+    # Check In/Out
+    "Check-In":           "Check In",
+    "Checkin":            "Check In",
+    "Check-Out":          "Check Out",
+    "Checkout":           "Check Out",
+    # Invoice To
+    "Bill To":            "Invoice To",
+    "Billed To":          "Invoice To",
+    "Client":             "Invoice To",
+    # Product
+    "Product":            "Product Type",
+    "Tipe Produk":        "Product Type",
+    "Service Type":       "Product Type",
+    # Hotel chain
+    "Hotel Chain":        "Hotel Group Chain",
+    "Chain":              "Hotel Group Chain",
+    "Group":              "Hotel Group Chain",
+}
 
 GLASS_PALETTE = ["#0D9488","#134E4A","#2DD4BF","#5EEAD4","#99F6E4","#CCFBF1","#0F766E","#042F2E"]
 TEAL_SCALE    = ["#CCFBF1","#99F6E4","#2DD4BF","#0D9488","#0F766E","#134E4A"]
@@ -246,6 +314,8 @@ def _read_excel_fast(file_obj):
         df = pd.read_excel(buf, usecols=keep, engine="openpyxl")
 
     df.columns = [re.sub(r'\s+', ' ', str(c).strip()) for c in df.columns]
+    # Terapkan alias kolom — normalisasi nama berbeda antar versi Opsifin
+    df.rename(columns={c: COL_ALIASES[c] for c in df.columns if c in COL_ALIASES}, inplace=True)
     return df
 
 def _parquet_cache_path(upload_hash: str) -> pathlib.Path:
@@ -381,11 +451,38 @@ def build_df_raw(files, norm_maps):
     df["Supplier_Category"] = sc_up.map(sc_rename).fillna(df["Supplier_Category"].astype(str).str.strip())
 
     # ── Total Room Night ───────────────────────────────────────────────────────
-    if "Room" in df.columns and "Night" in df.columns:
-        df["Total Room Night"] = (
-            pd.to_numeric(df["Room"],  errors="coerce").fillna(0) *
-            pd.to_numeric(df["Night"], errors="coerce").fillna(0)
-        )
+    if "Total Room Night" not in df.columns:
+        if "Room" in df.columns and "Night" in df.columns:
+            df["Total Room Night"] = (
+                pd.to_numeric(df["Room"],  errors="coerce").fillna(0) *
+                pd.to_numeric(df["Night"], errors="coerce").fillna(0)
+            )
+    if "Total Room Night" in df.columns:
+        df["Total Room Night"] = pd.to_numeric(df["Total Room Night"], errors="coerce").fillna(0)
+
+    # ── Agent: fallback ke kolom lain jika tidak ada ──────────────────────────
+    if "Agent" not in df.columns:
+        for alt in ["Sales Person","PIC","Handler","Booker","Handled By","Sales"]:
+            if alt in df.columns:
+                df["Agent"] = df[alt]
+                break
+
+    # ── Issued Date: fallback ─────────────────────────────────────────────────
+    if "Issued Date" not in df.columns:
+        for alt in ["Inv Date","Issue Date","Invoice Date","Tgl Invoice"]:
+            if alt in df.columns:
+                df["Issued Date"] = pd.to_datetime(df[alt], errors="coerce")
+                if "Issued_Month" not in df.columns:
+                    df["Issued_Month"] = df["Issued Date"].dt.strftime("%B")
+                    df["Issued_Year"]  = df["Issued Date"].dt.year.astype("Int16")
+                break
+
+    # ── Invoice No: fallback ──────────────────────────────────────────────────
+    if "Invoice No" not in df.columns:
+        for alt in ["Invoice Number","No Invoice","No. Invoice","Inv No","Ref No"]:
+            if alt in df.columns:
+                df["Invoice No"] = df[alt]
+                break
 
     # Drop sisa kolom yang tidak diperlukan
     df.drop(columns=[c for c in DROP_SET if c in df.columns], errors="ignore", inplace=True)
@@ -854,6 +951,24 @@ with st.sidebar:
     st.file_uploader("Upload Custom Report (.xlsx)", type=["xlsx"],
                      accept_multiple_files=True, key="main_upload",
                      label_visibility="collapsed")
+
+    # ── Debug: tampilkan kolom yang ditemukan ────────────────────────────────
+    if "df_raw" in st.session_state:
+        _dr = st.session_state["df_raw"]
+        _KEY_COLS = ["Issued Date","Invoice No","Total Room Night","Agent",
+                     "Supplier_Name","Hotel_Name","Hotel_City","Hotel_Chain",
+                     "Product Type","Sales AR","Profit","Supplier_Category","Full Name"]
+        _found   = [c for c in _KEY_COLS if c in _dr.columns]
+        _missing = [c for c in _KEY_COLS if c not in _dr.columns]
+        with st.expander(f"🔍 Debug Kolom ({len(_dr.columns)} kolom aktif)", expanded=bool(_missing)):
+            if _found:
+                st.markdown("**✅ Kolom ditemukan:**")
+                st.markdown(" · ".join(f"`{c}`" for c in _found))
+            if _missing:
+                st.markdown("**⚠️ Kolom tidak ditemukan (fitur terbatas):**")
+                st.markdown(" · ".join(f"`{c}`" for c in _missing))
+            st.markdown("**Semua kolom aktif di dataframe:**")
+            st.caption(", ".join(sorted(_dr.columns.tolist())))
 
     # ── Info engine & cache ───────────────────────────────────────────────────
     _cache_files = list(_CACHE_DIR.glob("raw_*.parquet"))
@@ -1389,7 +1504,8 @@ if uploaded_files and "df_raw" in st.session_state:
             fig2.update_layout(coloraxis_showscale=False, height=290, xaxis_title="", yaxis_title="")
             st.plotly_chart(theme(fig2), use_container_width=True)
         else:
-            st.warning("Kolom Issued Date atau Invoice No tidak ditemukan.")
+            _av = ", ".join(f"`{c}`" for c in df_view.columns[:20])
+            st.warning(f"⚠️ Kolom **Issued Date** atau **Invoice No** tidak ditemukan di file ini.\n\nKolom tersedia (20 pertama): {_av}\n\n💡 Periksa panel **🔍 Debug Kolom** di sidebar untuk detail lengkap.")
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 3 — SUPPLIER
@@ -1426,7 +1542,7 @@ if uploaded_files and "df_raw" in st.session_state:
                 .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s] if pd.to_numeric(s, errors='coerce').notna().any() else [""] * len(s), subset=["Total Room Night"]),
                 width="stretch")
         else:
-            st.warning("Kolom Supplier_Name atau Total Room Night tidak tersedia.")
+            st.warning("⚠️ Kolom **Supplier_Name** atau **Total Room Night** tidak tersedia.\n\n💡 Cek debug panel di sidebar — pastikan file memiliki kolom Supplier Name dan Room/Night.")
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 4 — PRODUCT TYPE
@@ -1453,7 +1569,7 @@ if uploaded_files and "df_raw" in st.session_state:
                     .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s] if pd.to_numeric(s, errors='coerce').notna().any() else [""] * len(s), subset=["Total Room Night"]),
                     width="stretch", height=360)
         else:
-            st.warning("Kolom Product Type atau Total Room Night tidak tersedia.")
+            st.warning("⚠️ Kolom **Product Type** atau **Total Room Night** tidak tersedia.\n\n💡 Cek debug panel di sidebar.")
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 5 — AGENT SCORECARD
@@ -1668,7 +1784,8 @@ if uploaded_files and "df_raw" in st.session_state:
                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                width="stretch")
         else:
-            st.warning("Kolom Agent, Invoice No, atau Total Room Night tidak ditemukan.")
+            _av2 = ", ".join(f"`{c}`" for c in df_view.columns[:20])
+            st.warning(f"⚠️ Kolom **Agent**, **Invoice No**, atau **Total Room Night** tidak ditemukan.\n\nKolom tersedia: {_av2}\n\n💡 Cek debug panel di sidebar — tambahkan mapping alias jika nama kolom berbeda.")
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 6 — PTM CORP
@@ -1676,7 +1793,7 @@ if uploaded_files and "df_raw" in st.session_state:
     with tab6:
         dfh = _cached_ptm(_vh, df_view)
         if dfh is None:
-            st.warning("Kolom Supplier_Name, Hotel_Name, atau Total Room Night tidak ditemukan.")
+            st.warning("⚠️ Kolom **Supplier_Name**, **Hotel_Name**, atau **Total Room Night** tidak ditemukan.\n\n💡 Cek debug panel di sidebar.")
         elif isinstance(dfh, pd.DataFrame) and dfh.empty:
             st.warning("Tidak ditemukan data Supplier PTM/Corp Rate.")
         else:
@@ -1733,7 +1850,7 @@ if uploaded_files and "df_raw" in st.session_state:
                     .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s] if pd.to_numeric(s, errors='coerce').notna().any() else [""] * len(s), subset=["Total Room Night"]),
                     width="stretch", height=380)
         else:
-            st.warning("Kolom Supplier_Category atau Total Room Night tidak tersedia.")
+            st.warning("⚠️ Kolom **Supplier_Category** atau **Total Room Night** tidak tersedia.\n\n💡 Cek debug panel di sidebar. Kolom ini otomatis dibuat saat Sync Data berhasil.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # EMPTY STATE
