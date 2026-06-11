@@ -1375,7 +1375,7 @@ if uploaded_files and "df_raw" in st.session_state:
                     _m = ti2[["Bulan","Invoice"]].rename(columns={"Invoice":"Invoice Unik"})
                 st.dataframe(
                     _m.style.format({c:"{:,.0f}" for c in _m.columns if _m[c].dtype!="O"})
-                    .background_gradient(subset=["Invoice Unik"],cmap="Purples"),
+                    .apply(lambda s: [f"background-color: rgba(88,28,220,{0.05 + 0.55*(v-s.min())/(s.max()-s.min()+1e-9):.2f}); color: #0F172A" for v in s] if s.max() > s.min() else [""] * len(s), subset=["Invoice Unik"]),
                     use_container_width=True, height=320)
             gsec("Volume Invoice per Bulan","📊")
             fig2 = px.bar(ti2, x="Bulan", y="Invoice", text="Invoice", color="Invoice",
@@ -1420,7 +1420,7 @@ if uploaded_files and "df_raw" in st.session_state:
             st.dataframe(
                 ss3.reset_index(drop=True)
                 .style.format({"Total Room Night":"{:,.0f}"})
-                .background_gradient(subset=["Total Room Night"],cmap="YlGnBu"),
+                .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-s.min())/(s.max()-s.min()+1e-9):.2f}); color: #0F172A" for v in s] if s.max() > s.min() else [""] * len(s), subset=["Total Room Night"]),
                 use_container_width=True)
         else:
             st.warning("Kolom Supplier_Name atau Total Room Night tidak tersedia.")
@@ -1447,7 +1447,7 @@ if uploaded_files and "df_raw" in st.session_state:
                 st.dataframe(
                     d4.reset_index(drop=True)
                     .style.format({"Total Room Night":"{:,.0f}"})
-                    .background_gradient(subset=["Total Room Night"],cmap="YlGnBu"),
+                    .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-s.min())/(s.max()-s.min()+1e-9):.2f}); color: #0F172A" for v in s] if s.max() > s.min() else [""] * len(s), subset=["Total Room Night"]),
                     use_container_width=True, height=360)
         else:
             st.warning("Kolom Product Type atau Total Room Night tidak tersedia.")
@@ -1696,7 +1696,7 @@ if uploaded_files and "df_raw" in st.session_state:
                 st.dataframe(
                     dfh.head(20).reset_index(drop=True)
                     .style.format({"Total Room Night":"{:,.0f}"})
-                    .background_gradient(subset=["Total Room Night"],cmap="YlGnBu"),
+                    .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-s.min())/(s.max()-s.min()+1e-9):.2f}); color: #0F172A" for v in s] if s.max() > s.min() else [""] * len(s), subset=["Total Room Night"]),
                     use_container_width=True, height=400)
                 _ob3 = io.BytesIO()
                 with pd.ExcelWriter(_ob3, engine="xlsxwriter") as _w:
@@ -1727,7 +1727,7 @@ if uploaded_files and "df_raw" in st.session_state:
                 st.dataframe(
                     cs7.reset_index(drop=True)
                     .style.format({"Total Room Night":"{:,.0f}"})
-                    .background_gradient(subset=["Total Room Night"],cmap="YlGnBu"),
+                    .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-s.min())/(s.max()-s.min()+1e-9):.2f}); color: #0F172A" for v in s] if s.max() > s.min() else [""] * len(s), subset=["Total Room Night"]),
                     use_container_width=True, height=380)
         else:
             st.warning("Kolom Supplier_Category atau Total Room Night tidak tersedia.")
