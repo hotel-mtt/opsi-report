@@ -10,7 +10,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import io, requests, re, hashlib, base64, os as _os
-import streamlit.components.v1 as components
+# st.components.v1 deprecated - using st.html() instead
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pathlib, tempfile
 
@@ -1305,9 +1305,8 @@ if uploaded_files and "df_raw" in st.session_state:
                         "pct":   pct,
                         "color": _RCOLS[min(idx, len(_RCOLS)-1)]
                     })
-                components.html(
-                    build_donut_html(segs, _fmt(_dgt), f"Berdasarkan invoice unik · {_fmt(_dgt)} total"),
-                    height=370, scrolling=False)
+                _donut_html = build_donut_html(segs, _fmt(_dgt), f"Berdasarkan invoice unik · {_fmt(_dgt)} total")
+                st.html(f'<div style="height:370px;overflow:hidden;">' + _donut_html + '</div>')
                 st.caption("*Domestic vs International dari kolom Product Type")
             else:
                 st.info("Kolom Product Type tidak tersedia.")
@@ -1332,12 +1331,12 @@ if uploaded_files and "df_raw" in st.session_state:
                 unsafe_allow_html=True)
         _s = st.session_state.pg * _rpp
         _e = _s + _rpp
-        st.dataframe(df_view.iloc[_s:_e], use_container_width=True)
+        st.dataframe(df_view.iloc[_s:_e], width="stretch")
         _dc, _ec = st.columns(2)
         with _dc:
             st.download_button("⬇ Download CSV",
                                df_view.to_csv(index=False).encode("utf-8"),
-                               "hotel_report.csv","text/csv",use_container_width=True)
+                               "hotel_report.csv","text/csv",width="stretch")
         with _ec:
             _ob = io.BytesIO()
             with pd.ExcelWriter(_ob, engine="xlsxwriter") as _w:
@@ -1345,7 +1344,7 @@ if uploaded_files and "df_raw" in st.session_state:
             st.download_button("⬇ Download Excel", _ob.getvalue(),
                                "hotel_report.xlsx",
                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               use_container_width=True)
+                               width="stretch")
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 2 — TREN INVOICE
@@ -1373,10 +1372,14 @@ if uploaded_files and "df_raw" in st.session_state:
                     _m.columns = ["Bulan","Invoice Unik","Room Night"]
                 else:
                     _m = ti2[["Bulan","Invoice"]].rename(columns={"Invoice":"Invoice Unik"})
-                st.dataframe(
-                    _m.style.format({c:"{:,.0f}" for c in _m.columns if _m[c].dtype!="O"})
-                    .apply(lambda s: [f"background-color: rgba(88,28,220,{0.05 + 0.55*(v-s.min())/(s.max()-s.min()+1e-9):.2f}); color: #0F172A" for v in s] if s.max() > s.min() else [""] * len(s), subset=["Invoice Unik"]),
-                    use_container_width=True, height=320)
+                _num_cols_m = [c for c in _m.columns if pd.api.types.is_numeric_dtype(_m[c])]
+                _sty_m = _m.style.format({c: "{:,.0f}" for c in _num_cols_m})
+                if "Invoice Unik" in _num_cols_m:
+                    _sty_m = _sty_m.apply(
+                        lambda s: [f"background-color: rgba(88,28,220,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s]
+                        if s.max() > s.min() else [""] * len(s),
+                        subset=["Invoice Unik"])
+                st.dataframe(_sty_m, width="stretch", height=320)
             gsec("Volume Invoice per Bulan","📊")
             fig2 = px.bar(ti2, x="Bulan", y="Invoice", text="Invoice", color="Invoice",
                           color_continuous_scale=["rgba(99,102,241,.3)","#0D9488","#0D9488"])
@@ -1420,8 +1423,8 @@ if uploaded_files and "df_raw" in st.session_state:
             st.dataframe(
                 ss3.reset_index(drop=True)
                 .style.format({"Total Room Night":"{:,.0f}"})
-                .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-s.min())/(s.max()-s.min()+1e-9):.2f}); color: #0F172A" for v in s] if s.max() > s.min() else [""] * len(s), subset=["Total Room Night"]),
-                use_container_width=True)
+                .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s] if pd.to_numeric(s, errors='coerce').notna().any() else [""] * len(s), subset=["Total Room Night"]),
+                width="stretch")
         else:
             st.warning("Kolom Supplier_Name atau Total Room Night tidak tersedia.")
 
@@ -1447,8 +1450,8 @@ if uploaded_files and "df_raw" in st.session_state:
                 st.dataframe(
                     d4.reset_index(drop=True)
                     .style.format({"Total Room Night":"{:,.0f}"})
-                    .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-s.min())/(s.max()-s.min()+1e-9):.2f}); color: #0F172A" for v in s] if s.max() > s.min() else [""] * len(s), subset=["Total Room Night"]),
-                    use_container_width=True, height=360)
+                    .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s] if pd.to_numeric(s, errors='coerce').notna().any() else [""] * len(s), subset=["Total Room Night"]),
+                    width="stretch", height=360)
         else:
             st.warning("Kolom Product Type atau Total Room Night tidak tersedia.")
 
@@ -1656,14 +1659,14 @@ if uploaded_files and "df_raw" in st.session_state:
             _df_sc = pd.DataFrame(_rows)
             st.dataframe(
                 _df_sc.style.format({c:"{:,.0f}" for c in ["Invoice","Room Night","Sales AR","Profit"]}),
-                use_container_width=True)
+                width="stretch")
             _ob_sc = io.BytesIO()
             with pd.ExcelWriter(_ob_sc, engine="xlsxwriter") as _w:
                 _df_sc.to_excel(_w, index=False, sheet_name="Scorecard")
             st.download_button("⬇ Download Scorecard", _ob_sc.getvalue(),
                                "scorecard_agent.xlsx",
                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               use_container_width=True)
+                               width="stretch")
         else:
             st.warning("Kolom Agent, Invoice No, atau Total Room Night tidak ditemukan.")
 
@@ -1696,14 +1699,14 @@ if uploaded_files and "df_raw" in st.session_state:
                 st.dataframe(
                     dfh.head(20).reset_index(drop=True)
                     .style.format({"Total Room Night":"{:,.0f}"})
-                    .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-s.min())/(s.max()-s.min()+1e-9):.2f}); color: #0F172A" for v in s] if s.max() > s.min() else [""] * len(s), subset=["Total Room Night"]),
-                    use_container_width=True, height=400)
+                    .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s] if pd.to_numeric(s, errors='coerce').notna().any() else [""] * len(s), subset=["Total Room Night"]),
+                    width="stretch", height=400)
                 _ob3 = io.BytesIO()
                 with pd.ExcelWriter(_ob3, engine="xlsxwriter") as _w:
                     dfh.to_excel(_w, index=False, sheet_name="Hotel_PTM")
                 st.download_button("⬇ Download", _ob3.getvalue(), "hotel_ptm.xlsx",
                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                   use_container_width=True)
+                                   width="stretch")
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 7 — KATEGORI SUPPLIER
@@ -1727,8 +1730,8 @@ if uploaded_files and "df_raw" in st.session_state:
                 st.dataframe(
                     cs7.reset_index(drop=True)
                     .style.format({"Total Room Night":"{:,.0f}"})
-                    .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(v-s.min())/(s.max()-s.min()+1e-9):.2f}); color: #0F172A" for v in s] if s.max() > s.min() else [""] * len(s), subset=["Total Room Night"]),
-                    use_container_width=True, height=380)
+                    .apply(lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color: #0F172A" for v in s] if pd.to_numeric(s, errors='coerce').notna().any() else [""] * len(s), subset=["Total Room Night"]),
+                    width="stretch", height=380)
         else:
             st.warning("Kolom Supplier_Category atau Total Room Night tidak tersedia.")
 
