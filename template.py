@@ -1,8 +1,8 @@
-# join_opsifin.py — Opsifin v9.3 Fixed · Hotel Report Dashboard
+# join_opsifin.py — Opsifin v10.0 · Hotel Report Dashboard
 # Rifyal Tumber · MTT · 2025
-# Fix: First Name (double-space→single), Check In/Out string parsing,
-#      Hotel Group Chain (bukan Hotel Chain), Invoice To (bukan Invoice_To),
-#      Agent kolom langsung, Room/Night int64, Profit% kolom drop.
+# v10: Optimasi performa — calamine engine (3-8x lebih cepat vs openpyxl),
+#      Parquet cache antar-session (instant load file yang sama),
+#      GDrive cache persistent ke disk, lazy import calamine.
 
 import streamlit as st
 import pandas as pd
@@ -12,6 +12,13 @@ import plotly.graph_objects as go
 import io, requests, re, hashlib, base64, os as _os
 import streamlit.components.v1 as components
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import pathlib, tempfile
+
+# ── Parquet / GDrive disk-cache ───────────────────────────────────────────────
+_CACHE_DIR = pathlib.Path(tempfile.gettempdir()) / "hotel_intel_cache"
+_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_GDRIVE_CACHE_DIR = _CACHE_DIR / "gdrive"
+_GDRIVE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 st.set_page_config(page_title="Hotel Intelligence · MTT", page_icon="🏨",
                    layout="wide", initial_sidebar_state="expanded")
@@ -158,12 +165,35 @@ def gsec(title, icon=""):
 # ── GDrive ────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_gdrive_mapping(file_id):
+    """Fetch mapping dari GDrive dengan disk-cache 1 jam agar restart app tetap cepat."""
+    import json, time
+    cache_file = _GDRIVE_CACHE_DIR / f"{file_id}.json"
+    # Cek disk cache (max 1 jam)
+    if cache_file.exists() and (time.time() - cache_file.stat().st_mtime) < 3600:
+        try:
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            return data["mapping"], data["count"]
+        except Exception:
+            pass
     try:
         r = requests.get(f"https://drive.google.com/uc?export=download&id={file_id}", timeout=20)
         r.raise_for_status()
-        df_map = pd.read_excel(io.BytesIO(r.content), engine="openpyxl")
+        # Gunakan calamine jika tersedia (lebih cepat), fallback ke openpyxl
+        try:
+            df_map = pd.read_excel(io.BytesIO(r.content), engine="calamine")
+        except Exception:
+            df_map = pd.read_excel(io.BytesIO(r.content), engine="openpyxl")
         if df_map.shape[1] >= 2:
-            return dict(zip(df_map.iloc[:,0].astype(str), df_map.iloc[:,1])), len(df_map)
+            mapping = dict(zip(df_map.iloc[:,0].astype(str), df_map.iloc[:,1]))
+            count   = len(df_map)
+            # Simpan ke disk
+            try:
+                cache_file.write_text(
+                    json.dumps({"mapping": mapping, "count": count}, ensure_ascii=False),
+                    encoding="utf-8")
+            except Exception:
+                pass
+            return mapping, count
         return {}, 0
     except Exception as e:
         return None, str(e)
@@ -181,23 +211,69 @@ def fetch_all_mappings_parallel():
                 st.toast(f"✓ {GDRIVE_LABELS[k]} · {result:,} baris", icon="✅")
     return nm, ss
 
-# ── Excel reader ──────────────────────────────────────────────────────────────
+# ── Excel reader (v10: calamine engine + Parquet cache) ───────────────────────
+def _get_excel_engine():
+    """Coba calamine dulu (3-8x lebih cepat), fallback ke openpyxl."""
+    try:
+        import python_calamine  # noqa: F401
+        return "calamine"
+    except ImportError:
+        return "openpyxl"
+
+_EXCEL_ENGINE = _get_excel_engine()
+
 def _read_excel_fast(file_obj):
-    # Baca raw bytes sekali, bungkus BytesIO agar bisa di-seek berkali-kali
+    """Baca Excel dengan engine terbaik yang tersedia. Gunakan usecols untuk hemat RAM."""
     raw = file_obj.read() if hasattr(file_obj, "read") else open(file_obj, "rb").read()
     buf = io.BytesIO(raw)
 
-    # Pass 1: baca header saja
-    df_hdr = pd.read_excel(buf, nrows=0, engine="openpyxl")
-    # Normalisasi nama kolom: strip + collapse whitespace
+    # Pass 1: header saja — deteksi kolom yang perlu di-drop
+    try:
+        df_hdr = pd.read_excel(buf, nrows=0, engine=_EXCEL_ENGINE)
+    except Exception:
+        buf.seek(0)
+        df_hdr = pd.read_excel(buf, nrows=0, engine="openpyxl")
+
     col_norm = {c: re.sub(r'\s+', ' ', str(c).strip()) for c in df_hdr.columns}
     keep = [c for c in df_hdr.columns if col_norm[c] not in DROP_SET]
 
-    # Pass 2: baca data dengan usecols (hemat RAM)
+    # Pass 2: baca data hanya kolom yang dibutuhkan
     buf.seek(0)
-    df = pd.read_excel(buf, usecols=keep, engine="openpyxl")
+    try:
+        df = pd.read_excel(buf, usecols=keep, engine=_EXCEL_ENGINE)
+    except Exception:
+        buf.seek(0)
+        df = pd.read_excel(buf, usecols=keep, engine="openpyxl")
+
     df.columns = [re.sub(r'\s+', ' ', str(c).strip()) for c in df.columns]
     return df
+
+def _parquet_cache_path(upload_hash: str) -> pathlib.Path:
+    return _CACHE_DIR / f"raw_{upload_hash}.parquet"
+
+def _load_parquet_cache(upload_hash: str):
+    """Muat dari Parquet cache jika tersedia (< 24 jam)."""
+    import time
+    p = _parquet_cache_path(upload_hash)
+    if p.exists() and (time.time() - p.stat().st_mtime) < 86400:
+        try:
+            return pd.read_parquet(p)
+        except Exception:
+            try: p.unlink()
+            except Exception: pass
+    return None
+
+def _save_parquet_cache(df: pd.DataFrame, upload_hash: str):
+    """Simpan ke Parquet cache untuk akses berikutnya."""
+    try:
+        # Parquet tidak mendukung period dtype — konversi ke string dulu
+        df_save = df.copy()
+        for col in df_save.columns:
+            if hasattr(df_save[col], "dt") and str(df_save[col].dtype).startswith("period"):
+                df_save[col] = df_save[col].astype(str)
+        df_save.to_parquet(_parquet_cache_path(upload_hash), index=False)
+    except Exception:
+        pass  # Cache gagal tidak masalah — app tetap jalan
 
 # ── build_df_raw ──────────────────────────────────────────────────────────────
 def build_df_raw(files, norm_maps):
@@ -315,7 +391,7 @@ def build_df_raw(files, norm_maps):
     df.drop(columns=[c for c in DROP_SET if c in df.columns], errors="ignore", inplace=True)
     return df
 
-# ── maybe_rebuild ─────────────────────────────────────────────────────────────
+# ── maybe_rebuild (v10: Parquet cache) ────────────────────────────────────────
 def maybe_rebuild_df(uploaded_files, norm_maps):
     if not uploaded_files:
         for k in ["df_raw","upload_hash"]: st.session_state.pop(k, None)
@@ -324,10 +400,23 @@ def maybe_rebuild_df(uploaded_files, norm_maps):
     nh = hashlib.md5(str(sorted((k,len(v)) for k,v in norm_maps.items())).encode()).hexdigest()
     combined = fh + nh
     if st.session_state.get("upload_hash") == combined and "df_raw" in st.session_state:
-        return False
-    with st.spinner("⏳ Memproses data..."):
-        st.session_state["df_raw"]      = build_df_raw(uploaded_files, norm_maps)
+        return False  # Sudah ada di session — tidak perlu re-build
+
+    # Coba muat dari Parquet disk-cache (instant jika file sama)
+    cached_df = _load_parquet_cache(combined)
+    if cached_df is not None:
+        st.session_state["df_raw"]      = cached_df
         st.session_state["upload_hash"] = combined
+        st.toast("⚡ Data dimuat dari cache (instan)", icon="⚡")
+        return True
+
+    # Proses ulang & simpan ke cache
+    engine_info = f"engine: {_EXCEL_ENGINE}"
+    with st.spinner(f"⏳ Memproses data... ({engine_info})"):
+        df = build_df_raw(uploaded_files, norm_maps)
+        st.session_state["df_raw"]      = df
+        st.session_state["upload_hash"] = combined
+        _save_parquet_cache(df, combined)
     return True
 
 # ── Cached per-tab ────────────────────────────────────────────────────────────
@@ -717,7 +806,7 @@ st.markdown("""
     </div>
   </div>
   <div class="ghdr-right">
-    <span class="ghdr-pill">v9.3</span>
+    <span class="ghdr-pill">v10.0</span>
     <div class="ghdr-live"><span class="ghdr-dot"></span>Live</div>
   </div>
 </div>
@@ -757,7 +846,7 @@ with st.sidebar:
       </div>
       <div>
         <div class="sb-name">Hotel <span>Report</span></div>
-        <div class="sb-ver">Opsifin · MTT · v9.3</div>
+        <div class="sb-ver">Opsifin · MTT · v10.0</div>
       </div>
     </div>""", unsafe_allow_html=True)
 
@@ -765,6 +854,30 @@ with st.sidebar:
     st.file_uploader("Upload Custom Report (.xlsx)", type=["xlsx"],
                      accept_multiple_files=True, key="main_upload",
                      label_visibility="collapsed")
+
+    # ── Info engine & cache ───────────────────────────────────────────────────
+    _cache_files = list(_CACHE_DIR.glob("raw_*.parquet"))
+    _cache_mb    = sum(f.stat().st_size for f in _cache_files) / 1_048_576
+    _engine_icon = "⚡" if _EXCEL_ENGINE == "calamine" else "🐢"
+    st.markdown(
+        f'''<div style="margin:4px 18px 2px;padding:8px 12px;background:#F0FDFA;
+            border:1px solid #CCFBF1;border-radius:8px;font-size:.58rem;line-height:1.8;">
+          <b style="color:#0D9488;">{_engine_icon} Engine:</b>
+          <span style="color:#0F766E;">{_EXCEL_ENGINE}</span><br>
+          <b style="color:#0D9488;">📦 Parquet cache:</b>
+          <span style="color:#64748B;">{len(_cache_files)} file · {_cache_mb:.1f} MB</span>
+        </div>''', unsafe_allow_html=True)
+    if _cache_files and st.button("🗑 Hapus Cache", use_container_width=True, key="btn_clear_cache"):
+        for f in _cache_files:
+            try: f.unlink()
+            except Exception: pass
+        for f in list(_GDRIVE_CACHE_DIR.glob("*.json")):
+            try: f.unlink()
+            except Exception: pass
+        for k in ["df_raw","upload_hash","norm_maps","sync_state"]:
+            st.session_state.pop(k, None)
+        st.toast("🗑 Cache dihapus", icon="🗑")
+        st.rerun()
 
     st.markdown('<div class="sb-div"></div><div class="sb-sec">Normalisasi · Google Drive</div>', unsafe_allow_html=True)
     _ss = st.session_state.get("sync_state", {})
@@ -1650,7 +1763,7 @@ else:
         <span style="font-size:.62rem;padding:6px 14px;border-radius:20px;
               background:#F8FAFC;color:#64748B;border:1px solid #E2E8F0;">Google Drive Sync</span>
         <span style="font-size:.62rem;padding:6px 14px;border-radius:20px;
-              background:#F0FDFA;color:#0D9488;border:1px solid #CCFBF1;">v9.3 Fixed</span>
+              background:#F0FDFA;color:#0D9488;border:1px solid #CCFBF1;">v10.0</span>
       </div>
     </div>""", unsafe_allow_html=True)
 
@@ -1668,7 +1781,7 @@ st.markdown("""
   </div>
   <div style="padding:12px 36px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;">
     <span style="font-size:.6rem;color:#94A3B8;">&copy; 2025 <strong style="color:#0D9488;">Hotel Intelligence</strong> · MTT</span>
-    <span style="font-size:.6rem;color:#94A3B8;">Powered by Streamlit · v9.3 Fixed</span>
+    <span style="font-size:.6rem;color:#94A3B8;">Powered by Streamlit · v10.0</span>
     <span style="font-size:.6rem;color:#94A3B8;">Built by <strong style="color:#0D9488;">Rifyal Tumber</strong> · MTT · 2025</span>
   </div>
 </div>""", unsafe_allow_html=True)
