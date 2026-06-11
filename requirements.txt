@@ -1,15 +1,41 @@
-streamlit==1.33.0
-pandas==2.2.2
-numpy==1.26.4
-openpyxl==3.1.2
-xlsxwriter==3.2.0
-plotly==5.22.0
-matplotlib==3.8.4
-gspread==6.0.2
-oauth2client==4.1.3
-google-auth==2.29.0
-google-auth-oauthlib==1.2.0
-google-auth-httplib2==0.2.0
-requests==2.31.0
-python-dateutil==2.9.0
-pytz==2024.1
+# ============================================================
+# requirements.txt — Hotel Intelligence v10.0
+# Rifyal Tumber · MTT · 2025
+# ============================================================
+# Install:
+#   pip install -r requirements.txt
+#
+# Untuk Streamlit Community Cloud, letakkan file ini
+# di root folder repo (sejajar dengan join_opsifin_v10.py)
+# ============================================================
+
+# ── Core dashboard ──────────────────────────────────────────
+streamlit>=1.35.0
+
+# ── Data processing ─────────────────────────────────────────
+pandas>=2.1.0
+numpy>=1.26.0
+
+# ── Visualisasi ─────────────────────────────────────────────
+plotly>=5.18.0
+
+# ── HTTP / GDrive fetch ─────────────────────────────────────
+requests>=2.31.0
+
+# ── Excel reader (wajib) ────────────────────────────────────
+# openpyxl = fallback engine (selalu diperlukan)
+openpyxl>=3.1.2
+
+# Excel writer untuk download button
+xlsxwriter>=3.1.0
+
+# ── Excel reader CEPAT (baru di v10) ────────────────────────
+# python-calamine: 3-8x lebih cepat dari openpyxl
+# Jika tidak bisa diinstall (misal hosting lama),
+# app tetap jalan — otomatis fallback ke openpyxl
+python-calamine>=0.5.0
+
+# ── Parquet cache (baru di v10) ─────────────────────────────
+# pyarrow: diperlukan untuk pd.read_parquet / to_parquet
+# Tanpa ini cache Parquet tidak aktif (app tetap jalan)
+pyarrow>=14.0.0
