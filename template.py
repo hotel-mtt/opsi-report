@@ -1,1674 +1,1871 @@
-# join_opsifin.py — Opsifin v9.3 Fixed · Hotel Report Dashboard
-# Rifyal Tumber · MTT · 2025
-# Fix: First Name (double-space→single), Check In/Out string parsing,
-#      Hotel Group Chain (bukan Hotel Chain), Invoice To (bukan Invoice_To),
-#      Agent kolom langsung, Room/Night int64, Profit% kolom drop.
-
+# =============================================================================
+#  AI CC Reporting System  v7  — Optimized (Fast Load)
+#  Optimization layers:
+#    1. get_all_values() ganti get_all_records()  → 3-5x lebih cepat
+#    2. TTL cache dinaikkan ke 1 jam + cache_data terpisah
+#    3. DuckDB in-memory untuk filter & agregasi dashboard
+#    4. Manual refresh hanya clear cache_data, bukan resource
+#    5. Google Apps Script (GAS) fallback endpoint opsional
+# =============================================================================
 import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-import io, requests, re, hashlib, base64, os as _os
-import streamlit.components.v1 as components
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import hmac, hashlib, time
+import gspread, json, base64, re, io, warnings, requests
+from google.oauth2.service_account import Credentials
+from datetime import datetime
+from PIL import Image
 
-st.set_page_config(page_title="Hotel Intelligence · MTT", page_icon="🏨",
-                   layout="wide", initial_sidebar_state="expanded")
+# ── Optional dependencies ─────────────────────────────────────────────────────
+try:
+    import pypdfium2 as _pdfium
+    _PDF_OK = True
+except ImportError:
+    _PDF_OK = False
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-GDRIVE_IDS = {
-    "hotel_chain":       "1r8dp_Chp-8QWKk_qXDMEehGj_c54U7ka",
-    "hotel_city":        "1RQkiBAJJYbdkZngtrVlicYQEBKj3kPYL",
-    "hotel_name":        "1paYSVhvvunLCZMKm4EF8TawvyRSHDC19",
-    "hotel_supplier":    "11BG3oFaNQNEHXxy7jpWXZ0-Z9P6CBpRx",
-    "supplier_category": "1zBudcR8Ia1nK0k4daMAOkOrIgvRO3GQD",
-}
-GDRIVE_LABELS = {
-    "hotel_chain": "Hotel Chain", "hotel_city": "Hotel City",
-    "hotel_name": "Hotel Name", "hotel_supplier": "Supplier",
-    "supplier_category": "Supplier Category",
-}
+try:
+    import duckdb
+    _DUCK_OK = True
+except ImportError:
+    _DUCK_OK = False
 
-# DROP_SET: nama kolom PERSIS dari file (setelah di-strip & collapse whitespace)
-DROP_SET = frozenset([
-    "No", "Branch", "Customer Type", "Customer Name", "Customer Code",
-    "PNR", "Base Fare", "Airlines", "Class", "Route",
-    "Departure Date", "Departure Time", "Arrival Date", "Arrival Time",
-    "NTA", "Airline Code", "Flight No", "Hotel Address", "Hotel Group Chain",
-    "Description", "Due Date", "Group Chain", "Source Reference", "Sales Net",
-    "Title", "Remark 1", "Remark 2", "Remark 3", "Remark 4", "Remark 5",
-    "Remark 6", "Remark 7", "Remark 8", "Remark 9", "Remark 10",
-    "Remark 11", "Remark 12",
-    "Supplier Code", "Ticket No", "Fare Tax", "IWJR", "Add Charge",
-    "Insurance", "PSC", "Other Charge", "Incentive", "Agent Comm",
-    "Travel Services", "VAT", "Stamp Fee", "MDR", "Extra Disc", "Rounding",
-    "Base Sell", "Currency", "Sales Handler", "Remark", "Source Rescode",
-    "Booking Code", "Voucher Number", "Room Type", "Profit %",
-])
+st.set_page_config(
+    page_title="Mitra CC Reporter",
+    page_icon="💳",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
 
-GLASS_PALETTE = ["#0D9488","#134E4A","#2DD4BF","#5EEAD4","#99F6E4","#CCFBF1","#0F766E","#042F2E"]
-TEAL_SCALE    = ["#CCFBF1","#99F6E4","#2DD4BF","#0D9488","#0F766E","#134E4A"]
+try:
+    from streamlit_cookies_controller import CookieController
+    _COOKIE_OK = True
+except ImportError:
+    _COOKIE_OK = False
 
-# Nama-nama ini tampil sebagai kartu individual — sisanya semua jadi "Other"
-KNOWN_PICS = ["API-DTM","Ade","Farras","Selvy","Vero","Firda","Meiji","Rida","Gerald","Baldy","Vial"]
+_COOKIE_NAME = "cc_report_auth"
 
-AGENT_MAP = {
-    "client-cre-mic-opc":   "API-DTM",
-    "client-cre-ptrmtt-cp": "API-DTM",
-    "api-dtm":              "API-DTM",
-    "farras":               "Farras",
-    "firda":                "Firda",
-    "rida.manora":          "Rida",
-    "rida":                 "Rida",
-    "meijika":              "Meiji",
-    "meiji":                "Meiji",
-    "veronica":             "Vero",
-    "vero":                 "Vero",
-    "selvy":                "Selvy",
-    "ade.puspita":          "Ade",
-    "ade":                  "Ade",
-    "shaiful.baldy":        "Baldy",
-    "baldy":                "Baldy",
-    "muhammad.geraldi":     "Gerald",
-    "geraldi":              "Gerald",
-    "gerald":               "Gerald",
-    "vial":                 "Vial",
-    "Vial":                 "Vial",
-    "rifyal.tumber":        "Vial",
-    "Rifyal.Tumber":        "Vial",
-    "achmad.vial":          "Vial",
-}
-
-_WHOLESALERS = frozenset([
-    "MG BEDBANK","MG BED BANK","MGBEDBANK","KLIKNBOOK","KLIK N BOOK","KLOOK",
-    "HOTELBEDS","HOTEL BEDS","WEBBEDS","WEB BEDS","TOURICO","GTA",
-    "JUMBO TOURS","WORLDHOTELS","RESTEL","BONOTEL","RECONLINE",
-])
-_CORPORATE   = frozenset(["PTM CORP RATE","CORPORATE RATE"])
-_DIRECT      = frozenset(["DIRECT TO HOTEL","DIRECT HOTEL","DIRECT"])
-_OTA         = frozenset([
-    "TRAVELOKA","TRAVELOKA BUSINESS","TIKET.COM","BOOKING.COM","BOOKING COM",
-    "AGODA","AGODA CORPORATE","EXPEDIA","HOTELS.COM",
-])
-CBT_ALIASES  = frozenset([
-    "CBT PERTAMINA(HOTEL CM)","CBT PERTAMINA (HOTEL)",
-    "PERTAMINA ENERGY TERMINAL (CBT)","CBT PERTAMINA",
-])
-
-# ── Utility ───────────────────────────────────────────────────────────────────
-def _load_avatar_b64(pic_name):
-    base = _os.path.dirname(_os.path.abspath(__file__))
-    for ext in [".jpg",".jpeg",".png",".webp"]:
-        p = _os.path.join(base, "assets", pic_name + ext)
-        if _os.path.isfile(p):
-            with open(p,"rb") as f:
-                data = base64.b64encode(f.read()).decode()
-            mime = "image/jpeg" if ext in [".jpg",".jpeg"] else ("image/png" if ext==".png" else "image/webp")
-            return f"data:{mime};base64,{data}"
-    return ""
-
-def _is_valid_file(f):
-    try: _=f.name; _=f.size; return True
-    except: return False
-
-def compute_upload_hash(files):
-    valid = [f for f in files if _is_valid_file(f)]
-    if not valid: return ""
-    h = hashlib.md5()
-    for f in sorted(valid, key=lambda x: x.name):
-        h.update(f.name.encode()); h.update(str(f.size).encode())
-    return h.hexdigest()
-
-def make_view_hash(df):
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AUTH
+# ═══════════════════════════════════════════════════════════════════════════════
+def _get_password():
     try:
-        return hashlib.md5(pd.util.hash_pandas_object(df, index=True).values.tobytes()).hexdigest()
+        p = st.secrets["auth"]["password"]
+        if p and "GANTI" not in p:
+            return p
     except:
-        return hashlib.md5(f"{df.shape}{list(df.columns)}".encode()).hexdigest()
+        pass
+    return st.session_state.get("_auth_pw_override", "")
 
-def compact_num(v):
+
+def _ttl_hours():
     try:
-        v=float(v); a=abs(v)
-        if a>=1e9: return f"{v/1e9:.1f}B"
-        if a>=1e6: return f"{v/1e6:.1f}M"
-        if a>=1e3: return f"{v/1e3:.1f}K"
-        return f"{int(v):,}"
-    except: return str(v)
+        return float(st.secrets["auth"].get("session_ttl_hours", 8))
+    except:
+        return 8.0
 
-def theme(fig):
-    fig.update_layout(
-        font_family="Open Sans", font_color="#525F7F", font_size=12,
-        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=12,r=12,t=40,b=12),
-        legend=dict(font=dict(size=11),bgcolor="rgba(255,255,255,.8)",
-                    bordercolor="rgba(0,0,0,.06)",borderwidth=1),
-        hoverlabel=dict(bgcolor="#fff",bordercolor="rgba(0,0,0,.1)",
-                        font_size=12,font_color="#32325D"),
+
+def _check_pw(candidate):
+    correct = _get_password()
+    if not correct:
+        return False
+    return hmac.compare_digest(
+        hashlib.sha256(candidate.encode()).digest(),
+        hashlib.sha256(correct.encode()).digest(),
     )
-    fig.update_xaxes(showgrid=True,gridcolor="rgba(0,0,0,.06)",zeroline=False,
-                     tickfont=dict(size=11,color="#8898AA"))
-    fig.update_yaxes(showgrid=True,gridcolor="rgba(0,0,0,.06)",zeroline=False,
-                     tickfont=dict(size=11,color="#8898AA"))
-    return fig
 
-def gsec(title, icon=""):
-    lbl = (f'<span style="font-size:.75rem;margin-right:4px;">{icon}</span>{title}') if icon else title
-    st.markdown(f'<div class="gsec">{lbl}</div>', unsafe_allow_html=True)
 
-# ── GDrive ────────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_gdrive_mapping(file_id):
-    try:
-        r = requests.get(f"https://drive.google.com/uc?export=download&id={file_id}", timeout=20)
-        r.raise_for_status()
-        df_map = pd.read_excel(io.BytesIO(r.content), engine="openpyxl")
-        if df_map.shape[1] >= 2:
-            return dict(zip(df_map.iloc[:,0].astype(str), df_map.iloc[:,1])), len(df_map)
-        return {}, 0
-    except Exception as e:
-        return None, str(e)
+def _make_token():
+    pw = _get_password()
+    ts = str(int(time.time()))
+    sig = hmac.new(pw.encode(), (pw + ts).encode(), hashlib.sha256).hexdigest()
+    return f"{ts}:{sig}"
 
-def fetch_all_mappings_parallel():
-    nm, ss = {}, {}
-    with ThreadPoolExecutor(max_workers=len(GDRIVE_IDS)) as ex:
-        futs = {ex.submit(fetch_gdrive_mapping, fid): k for k, fid in GDRIVE_IDS.items()}
-        for fut in as_completed(futs):
-            k = futs[fut]; mapping, result = fut.result()
-            if mapping is None:
-                ss[k] = "err"; st.toast(f"✗ {GDRIVE_LABELS[k]}", icon="❌")
-            else:
-                nm[k] = mapping; ss[k] = "ok"
-                st.toast(f"✓ {GDRIVE_LABELS[k]} · {result:,} baris", icon="✅")
-    return nm, ss
 
-# ── Excel reader ──────────────────────────────────────────────────────────────
-def _read_excel_fast(file_obj):
-    # Baca raw bytes sekali, bungkus BytesIO agar bisa di-seek berkali-kali
-    raw = file_obj.read() if hasattr(file_obj, "read") else open(file_obj, "rb").read()
-    buf = io.BytesIO(raw)
-
-    # Pass 1: baca header saja
-    df_hdr = pd.read_excel(buf, nrows=0, engine="openpyxl")
-    # Normalisasi nama kolom: strip + collapse whitespace
-    col_norm = {c: re.sub(r'\s+', ' ', str(c).strip()) for c in df_hdr.columns}
-    keep = [c for c in df_hdr.columns if col_norm[c] not in DROP_SET]
-
-    # Pass 2: baca data dengan usecols (hemat RAM)
-    buf.seek(0)
-    df = pd.read_excel(buf, usecols=keep, engine="openpyxl")
-    df.columns = [re.sub(r'\s+', ' ', str(c).strip()) for c in df.columns]
-    return df
-
-# ── build_df_raw ──────────────────────────────────────────────────────────────
-def build_df_raw(files, norm_maps):
-    dfs = []
-    for f in files:
-        try:
-            dfs.append(_read_excel_fast(f))
-        except Exception as e:
-            st.toast(f"⚠️ Gagal baca {getattr(f,'name','?')}: {e}", icon="⚠️")
-    if not dfs:
-        return pd.DataFrame()
-
-    df = pd.concat(dfs, ignore_index=True)
-
-    # ── Tanggal datetime ───────────────────────────────────────────────────────
-    for col in ["Inv Date", "Issued Date"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-    # Check In / Check Out disimpan sebagai string 'YYYY-MM-DD' di file ini
-    for col in ["Check In", "Check Out"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-
-    if "Issued Date" in df.columns:
-        df["Issued_Month"] = df["Issued Date"].dt.strftime("%B")
-        df["Issued_Year"]  = df["Issued Date"].dt.year.astype("Int16")
-
-    # ── Full Name ──────────────────────────────────────────────────────────────
-    # File punya "First Name" (setelah normalisasi double-space) + "Last Name"
-    fn = df["First Name"].fillna("").astype(str).str.strip() if "First Name" in df.columns else pd.Series([""] * len(df), index=df.index)
-    ln = df["Last Name"].fillna("").astype(str).str.strip()  if "Last Name"  in df.columns else pd.Series([""] * len(df), index=df.index)
-    df["Full Name"] = (fn + " " + ln).str.strip().str.upper()
-    df.drop(columns=["First Name","Last Name","Title"], errors="ignore", inplace=True)
-
-    # ── Normalized Invoice To ──────────────────────────────────────────────────
-    if "Invoice To" in df.columns:
-        inv_str = df["Invoice To"].astype(str).str.strip()
-        df["Normalized_Inv_To"] = np.where(
-            inv_str.str.upper().isin(CBT_ALIASES), "CBT PERTAMINA",
-            np.where(inv_str.isin(["","nan","None","NaN"]), "Unknown", inv_str)
-        )
-
-    # ── Normalisasi via GDrive mapping ─────────────────────────────────────────
-    # hotel_chain: file tidak punya "Hotel Chain", pakai "Hotel Group Chain"
-    for map_key, src_col, dst_col in [
-        ("hotel_city",     "Hotel City",        "Hotel_City"),
-        ("hotel_name",     "Hotel Name",        "Hotel_Name"),
-        ("hotel_chain",    "Hotel Group Chain", "Hotel_Chain"),
-        ("hotel_supplier", "Supplier Name",     "Supplier_Name"),
-    ]:
-        if src_col in df.columns:
-            src = df[src_col].astype(str).str.strip()
-            if norm_maps.get(map_key):
-                df[dst_col] = src.map(norm_maps[map_key]).fillna(src)
-            else:
-                df[dst_col] = src
-        elif dst_col not in df.columns:
-            df[dst_col] = ""
-
-    if "Supplier Name" in df.columns and "Supplier_Name" not in df.columns:
-        df["Supplier_Name"] = df["Supplier Name"].fillna("Unknown")
-    if "Supplier_Name" not in df.columns:
-        df["Supplier_Name"] = "Unknown"
-
-    # ── Supplier Category (vectorized) ────────────────────────────────────────
-    _raw  = df.get("Supplier Name", pd.Series([""] * len(df), index=df.index)).astype(str).str.strip().str.upper()
-    _norm = df["Supplier_Name"].astype(str).str.strip().str.upper()
-
-    if norm_maps.get("supplier_category"):
-        sc_upper = {str(k).strip().upper(): v for k, v in norm_maps["supplier_category"].items()}
-        df["Supplier_Category"] = _raw.map(sc_upper).astype(object)
-        mask_nan = df["Supplier_Category"].isna()
-        if mask_nan.any():
-            df.loc[mask_nan, "Supplier_Category"] = _norm[mask_nan].map(sc_upper)
-    else:
-        df["Supplier_Category"] = pd.Series([""] * len(df), index=df.index, dtype=object)
-
-    unc = df["Supplier_Category"].isna() | (df["Supplier_Category"].astype(str).str.strip().isin(["","Uncategorized"]))
-    if unc.any():
-        conds = [
-            (_raw.isin(_DIRECT)     | _norm.isin(_DIRECT))     & unc,
-            (_raw.isin(_CORPORATE)  | _norm.isin(_CORPORATE))  & unc,
-            (_raw.isin(_WHOLESALERS)| _norm.isin(_WHOLESALERS))& unc,
-            (_raw.isin(_OTA)        | _norm.isin(_OTA))         & unc,
-            _raw.str.contains("BEDBANK|WHOLESAL", regex=True, na=False) & unc,
-            _raw.str.contains("DIRECT",  na=False)              & unc,
-            _raw.str.contains("CORP.*RATE|RATE.*CORP", regex=True, na=False) & unc,
-            _raw.str.contains("CHANNEL MANAGER", na=False)      & unc,
-        ]
-        choices = ["DIRECT HOTEL","CORPORATE RATE","WHOLESALER","OTA",
-                   "WHOLESALER","DIRECT HOTEL","CORPORATE RATE","CHANNEL MANAGER"]
-        # Use pd.Series to avoid dtype mismatch
-        assigned = pd.Series(
-            np.select([c[unc] for c in conds], choices, default="Uncategorized"),
-            index=df.index[unc])
-        df.loc[unc, "Supplier_Category"] = assigned
-
-    df["Supplier_Category"] = df["Supplier_Category"].fillna("Uncategorized")
-    sc_rename = {
-        "DIRECT TO HOTEL":"DIRECT HOTEL","DIRECT HOTEL":"DIRECT HOTEL",
-        "PTM CORP RATE":"CORPORATE RATE","CORPORATE RATE":"CORPORATE RATE",
-        "WHOLESALER":"WHOLESALER","OTA":"OTA","CHANNEL MANAGER":"CHANNEL MANAGER",
-    }
-    sc_up = df["Supplier_Category"].astype(str).str.strip().str.upper()
-    df["Supplier_Category"] = sc_up.map(sc_rename).fillna(df["Supplier_Category"].astype(str).str.strip())
-
-    # ── Total Room Night ───────────────────────────────────────────────────────
-    if "Room" in df.columns and "Night" in df.columns:
-        df["Total Room Night"] = (
-            pd.to_numeric(df["Room"],  errors="coerce").fillna(0) *
-            pd.to_numeric(df["Night"], errors="coerce").fillna(0)
-        )
-
-    # Drop sisa kolom yang tidak diperlukan
-    df.drop(columns=[c for c in DROP_SET if c in df.columns], errors="ignore", inplace=True)
-    return df
-
-# ── maybe_rebuild ─────────────────────────────────────────────────────────────
-def maybe_rebuild_df(uploaded_files, norm_maps):
-    if not uploaded_files:
-        for k in ["df_raw","upload_hash"]: st.session_state.pop(k, None)
+def _verify_token(token):
+    if not token or ":" not in token:
         return False
-    fh = compute_upload_hash(uploaded_files)
-    nh = hashlib.md5(str(sorted((k,len(v)) for k,v in norm_maps.items())).encode()).hexdigest()
-    combined = fh + nh
-    if st.session_state.get("upload_hash") == combined and "df_raw" in st.session_state:
-        return False
-    with st.spinner("⏳ Memproses data..."):
-        st.session_state["df_raw"]      = build_df_raw(uploaded_files, norm_maps)
-        st.session_state["upload_hash"] = combined
-    return True
-
-# ── Cached per-tab ────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def _cached_invoice_trend(vh, _df):
-    if "Issued Date" not in _df.columns or "Invoice No" not in _df.columns:
-        return None, None
-    dt = _df.dropna(subset=["Issued Date","Invoice No"]).copy()
-    dt = dt[~dt["Invoice No"].astype(str).str.strip().isin(["","nan","None","NaN"])]
-    dt["_ml"] = dt["Issued Date"].dt.strftime("%b")
-    dt["_mn"] = dt["Issued Date"].dt.month
-    ti = dt.groupby(["_ml","_mn"])["Invoice No"].nunique().reset_index()
-    ti.columns = ["Bulan","MonN","Invoice"]
-    ti = ti.sort_values("MonN").reset_index(drop=True)
-    tr2 = None
-    if "Total Room Night" in dt.columns:
-        tr2 = dt.groupby("_ml")["Total Room Night"].sum().reset_index()
-        tr2.columns = ["Bulan","Room Night"]
-    return ti, tr2
-
-@st.cache_data(show_spinner=False)
-def _cached_supplier(vh, _df):
-    if "Supplier_Name" not in _df.columns or "Total Room Night" not in _df.columns:
-        return None, None
-    tmp = (_df[["Supplier_Name","Total Room Night"]]
-           .dropna(subset=["Supplier_Name"])
-           .assign(Supplier_Name=lambda d: d["Supplier_Name"].astype(str).str.strip())
-           .pipe(lambda d: d[~d["Supplier_Name"].isin(["","nan","None","NaN"])]))
-    ss = tmp.groupby("Supplier_Name")["Total Room Night"].sum().reset_index().sort_values("Total Room Night", ascending=False)
-    tail_sum = ss.iloc[5:]["Total Room Night"].sum() if len(ss) > 5 else 0
-    top = ss.head(5)
-    d = pd.concat([top, pd.DataFrame([{"Supplier_Name":"Others","Total Room Night":tail_sum}])] if len(ss)>5 else [top], ignore_index=True)
-    return ss, d
-
-@st.cache_data(show_spinner=False)
-def _cached_product(vh, _df):
-    if "Product Type" not in _df.columns or "Total Room Night" not in _df.columns:
-        return None, None
-    tmp = (_df[["Product Type","Total Room Night"]]
-           .dropna(subset=["Product Type"])
-           .assign(**{"Product Type": lambda d: d["Product Type"].astype(str).str.strip()})
-           .pipe(lambda d: d[~d["Product Type"].isin(["","nan","None","NaN"])]))
-    ps = tmp.groupby("Product Type")["Total Room Night"].sum().reset_index().sort_values("Total Room Night", ascending=False)
-    tail_sum = ps.iloc[6:]["Total Room Night"].sum() if len(ps) > 6 else 0
-    top = ps.head(6)
-    d = pd.concat([top, pd.DataFrame([{"Product Type":"Others","Total Room Night":tail_sum}])] if len(ps)>6 else [top], ignore_index=True)
-    return ps, d
-
-@st.cache_data(show_spinner=False)
-def _cached_ptm(vh, _df):
-    if not all(c in _df.columns for c in ["Supplier_Name","Hotel_Name","Total Room Night"]):
-        return None
-    mask = _df["Supplier_Name"].astype(str).str.upper().str.contains("PTM|CORP RATE", regex=True, na=False)
-    dfptm = _df[mask]
-    if dfptm.empty:
-        return pd.DataFrame()
-    tmp = (dfptm[["Hotel_Name","Total Room Night"]]
-           .dropna(subset=["Hotel_Name"])
-           .assign(Hotel_Name=lambda d: d["Hotel_Name"].astype(str).str.strip())
-           .pipe(lambda d: d[~d["Hotel_Name"].isin(["","nan","None","NaN"])]))
-    return tmp.groupby("Hotel_Name", as_index=False)["Total Room Night"].sum().sort_values("Total Room Night", ascending=False)
-
-@st.cache_data(show_spinner=False)
-def _cached_cat(vh, _df):
-    if "Supplier_Category" not in _df.columns or "Total Room Night" not in _df.columns:
-        return None, None
-    tmp = (_df[["Supplier_Category","Total Room Night"]]
-           .dropna(subset=["Supplier_Category"])
-           .assign(Supplier_Category=lambda d: d["Supplier_Category"].astype(str).str.strip())
-           .pipe(lambda d: d[~d["Supplier_Category"].isin(["","nan","None","NaN"])]))
-    cs = tmp.groupby("Supplier_Category")["Total Room Night"].sum().reset_index().sort_values("Total Room Night", ascending=False)
-    tail_sum = cs.iloc[5:]["Total Room Night"].sum() if len(cs) > 5 else 0
-    top = cs.head(5)
-    d = pd.concat([top, pd.DataFrame([{"Supplier_Category":"Others","Total Room Night":tail_sum}])] if len(cs)>5 else [top], ignore_index=True)
-    return cs, d
-
-def get_prev_period_metrics(df_raw, df_view):
     try:
-        if "Issued Date" not in df_raw.columns or df_view.empty:
-            return {}
-        curr_min = df_view["Issued Date"].dropna().min()
-        curr_max = df_view["Issued Date"].dropna().max()
-        if pd.isnull(curr_min) or pd.isnull(curr_max):
-            return {}
-        delta    = curr_max - curr_min
-        prev_max = curr_min - pd.Timedelta(days=1)
-        prev_min = prev_max - delta
-        raw_min  = df_raw["Issued Date"].dropna().min()
-        raw_max  = df_raw["Issued Date"].dropna().max()
-        overlap  = max((min(prev_max,raw_max) - max(prev_min,raw_min)).days + 1, 0)
-        period   = max((prev_max - prev_min).days + 1, 1)
-        if overlap / period < 0.80:
-            return {}
-        prev = df_raw[(df_raw["Issued Date"] >= prev_min) & (df_raw["Issued Date"] <= prev_max)]
-        if len(prev) < 5:
-            return {}
-        m = {"rows":len(prev), "prev_min":prev_min.strftime("%d %b %Y"), "prev_max":prev_max.strftime("%d %b %Y")}
-        m["ui"] = int(prev["Invoice No"].nunique())                        if "Invoice No"       in prev.columns else None
-        m["rn"] = int(np.ceil(prev["Total Room Night"].sum()))             if "Total Room Night" in prev.columns else None
-        m["sa"] = float(prev["Sales AR"].fillna(0).astype(float).sum())   if "Sales AR"         in prev.columns else None
-        m["up"] = int(prev["Full Name"].dropna().nunique())                if "Full Name"        in prev.columns else None
-        if "Profit" in prev.columns and "Sales AR" in prev.columns:
-            _p = prev["Profit"].fillna(0).astype(float)
-            _s = prev["Sales AR"].fillna(0).astype(float)
-            mm = _s != 0
-            m["pm"] = float((_p[mm]/_s[mm]*100).mean()) if mm.any() else 0.0
-        return m
+        ts_str, sig = token.split(":", 1)
+        ts = int(ts_str)
+        if (time.time() - ts) > _ttl_hours() * 3600:
+            return False
+        pw = _get_password()
+        expected = hmac.new(
+            pw.encode(), (pw + ts_str).encode(), hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(sig, expected)
     except:
-        return {}
+        return False
 
-# ── Donut HTML ────────────────────────────────────────────────────────────────
-def build_donut_html(segments, total_label, subtitle=""):
-    import json
-    segs_js = json.dumps(segments, ensure_ascii=False)
-    html = """<!DOCTYPE html><html><head><meta charset="UTF-8">
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@700;800&family=DM+Sans:wght@400;600;700&display=swap" rel="stylesheet">
-<style>
-*{box-sizing:border-box;margin:0;padding:0;}
-body{background:transparent;font-family:'DM Sans',sans-serif;}
-.wrap{background:#fff;border:1px solid #E2E8F0;border-radius:16px;padding:18px 20px 14px;width:100%;}
-.hdr{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px;gap:8px;}
-.title{font-family:'Space Grotesk',sans-serif;font-size:.88rem;font-weight:700;color:#0F172A;}
-.sub{font-size:.53rem;color:#94A3B8;margin-top:3px;}
-.live{display:flex;align-items:center;gap:5px;background:#F0FDF9;border:1px solid #CCFBF1;border-radius:8px;padding:4px 10px;font-size:.54rem;font-weight:700;color:#0D9488;}
-.dot{width:6px;height:6px;border-radius:50%;background:#0D9488;animation:pulse 2s infinite;}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-.body{display:flex;align-items:center;gap:18px;flex-wrap:wrap;}
-.cwrap{position:relative;flex-shrink:0;}
-.ctxt{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;}
-.cnum{font-family:'Space Grotesk',sans-serif;font-size:1.2rem;font-weight:800;color:#0F172A;line-height:1;}
-.clbl{font-size:.5rem;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:#94A3B8;}
-.legend{flex:1;min-width:130px;display:flex;flex-direction:column;gap:2px;}
-.lrow{display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:9px;cursor:default;}
-.lrow:hover{background:#F0FDF9;}
-.lcolor{width:9px;height:9px;border-radius:3px;flex-shrink:0;}
-.lbody{flex:1;min-width:0;}
-.lname{font-size:.64rem;font-weight:700;color:#0F172A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px;}
-.lbwrap{height:4px;background:#F1F5F9;border-radius:4px;overflow:hidden;margin-bottom:3px;}
-.lbar{height:100%;border-radius:4px;width:0;transition:width .9s cubic-bezier(.4,0,.2,1);}
-.lmeta{display:flex;justify-content:space-between;align-items:center;}
-.lval{font-family:'Space Grotesk',sans-serif;font-size:.59rem;font-weight:700;}
-.lpct{font-size:.53rem;font-weight:600;padding:1px 6px;border-radius:10px;}
-</style></head><body>
-<div class="wrap">
-  <div class="hdr">
-    <div><div class="title">&#127758; Distribusi Invoice</div><div class="sub">SUBTITLE</div></div>
-    <div class="live"><span class="dot"></span>Live</div>
-  </div>
-  <div class="body">
-    <div class="cwrap">
-      <svg width="170" height="170" viewBox="0 0 170 170" id="svg"></svg>
-      <div class="ctxt"><div class="cnum" id="cnum">-</div><div class="clbl">INVOICE</div></div>
-    </div>
-    <div class="legend" id="lg"></div>
-  </div>
-</div>
-<script>
-const SEGS=SEGS_JS,TOTAL="TOTAL_LBL";
-const CX=85,CY=85,R=65,SW=26,GAP=2.5;
-const svg=document.getElementById('svg');
-document.getElementById('cnum').textContent=TOTAL;
-const tp=SEGS.reduce((a,s)=>a+s.pct,0)||100,av=360-GAP*SEGS.length;
-function P(cx,cy,r,deg){const rad=(deg-90)*Math.PI/180;return[cx+r*Math.cos(rad),cy+r*Math.sin(rad)];}
-function arc(s,e){const ro=R+SW/2,ri=R-SW/2,lg=e-s>180?1:0;
-const[x1,y1]=P(CX,CY,ro,s+1),[x2,y2]=P(CX,CY,ro,e-1),[ix1,iy1]=P(CX,CY,ri,e-1),[ix2,iy2]=P(CX,CY,ri,s+1);
-return`M ${x1} ${y1} A ${ro} ${ro} 0 ${lg} 1 ${x2} ${y2} L ${ix1} ${iy1} A ${ri} ${ri} 0 ${lg} 0 ${ix2} ${iy2} Z`;}
-const tr=document.createElementNS('http://www.w3.org/2000/svg','circle');
-tr.setAttribute('cx',CX);tr.setAttribute('cy',CY);tr.setAttribute('r',R);
-tr.setAttribute('fill','none');tr.setAttribute('stroke','#F1F5F9');tr.setAttribute('stroke-width',SW);
-svg.appendChild(tr);
-let sd=0;SEGS.forEach((sg,i)=>{const sw=sg.pct/tp*av,ed=sd+sw;
-const p=document.createElementNS('http://www.w3.org/2000/svg','path');
-p.setAttribute('fill',sg.color);p.setAttribute('d',arc(sd,ed));
-p.style.opacity='0';p.style.transition=`opacity .3s ease ${i*.1}s`;
-svg.appendChild(p);sd=ed+GAP;});
-setTimeout(()=>svg.querySelectorAll('path').forEach(p=>p.style.opacity='1'),80);
-const lg=document.getElementById('lg');
-SEGS.forEach((sg,i)=>{const row=document.createElement('div');row.className='lrow';
-row.innerHTML=`<div class="lcolor" style="background:${sg.color};"></div>`
-+`<div class="lbody"><div class="lname">${sg.label}</div>`
-+`<div class="lbwrap"><div class="lbar" id="b${i}" style="background:${sg.color};"></div></div>`
-+`<div class="lmeta"><span class="lval" style="color:${sg.color};">${Number(sg.value).toLocaleString('id-ID')}</span>`
-+`<span class="lpct" style="background:${sg.color}18;color:${sg.color};">${sg.pct}%</span></div></div>`;
-lg.appendChild(row);});
-setTimeout(()=>SEGS.forEach((_,i)=>document.getElementById('b'+i).style.width=SEGS[i].pct+'%'),300);
-</script></body></html>"""
-    html = html.replace("SEGS_JS", segs_js)
-    html = html.replace("TOTAL_LBL", str(total_label))
-    html = html.replace("SUBTITLE", subtitle)
-    return html
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CSS
-# ══════════════════════════════════════════════════════════════════════════════
-_CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=DM+Sans:wght@400;600;700;800&family=Sora:wght@600;700;800&display=swap');
-:root{--bg:#F4F6F9;--card:#fff;--t1:#0F172A;--t2:#334155;--t3:#64748B;--t4:#94A3B8;
-  --p:#0D9488;--p2:#0F766E;--p3:#134E4A;--pl:#F0FDFA;--pm:#CCFBF1;
-  --bd:#E2E8F0;--r:.375rem;--r2:.5rem;
-  --f:'Inter',sans-serif;--fh:'DM Sans',sans-serif;--fd:'Sora',sans-serif;}
-*,*::before,*::after{box-sizing:border-box;}
-html,body,[class*="css"]{font-family:var(--f)!important;font-size:13px!important;
-  color:var(--t2)!important;background-color:var(--bg)!important;-webkit-font-smoothing:antialiased;}
-.stApp,body{background-color:var(--bg)!important;}
-.block-container{padding:0!important;max-width:100%!important;overflow-x:hidden!important;}
-.main .block-container,[data-testid="stMainBlockContainer"]{padding:24px 38px 80px!important;max-width:100%!important;}
-section[data-testid="stMain"]>div{padding:24px 38px 80px!important;}
-[data-testid="collapsedControl"],[data-testid="stSidebarCollapseButton"],
-button[data-testid="baseButton-header"],#MainMenu,footer,header{display:none!important;}
-::-webkit-scrollbar{width:5px;height:5px;}
-::-webkit-scrollbar-thumb{background:#CDD0D5;border-radius:10px;}
-/* HEADER */
-.ghdr{background:#fff;padding:0 36px;height:60px;display:flex;align-items:center;
-  justify-content:space-between;position:sticky;top:0;z-index:500;border-bottom:1px solid var(--bd);}
-.ghdr-brand{display:flex;align-items:center;gap:12px;}
-.ghdr-logo{width:34px;height:34px;background:var(--pl);border-radius:var(--r2);
-  display:grid;place-items:center;flex-shrink:0;border:1px solid var(--pm);}
-.ghdr-name{font-family:var(--fh);font-size:.93rem;font-weight:700;color:var(--t1);}
-.ghdr-name span{color:var(--p);font-weight:500;}
-.ghdr-sub{font-size:.58rem;color:var(--t4);margin-top:2px;letter-spacing:.5px;text-transform:uppercase;}
-.ghdr-right{display:flex;align-items:center;gap:8px;}
-.ghdr-live{display:flex;align-items:center;gap:6px;font-size:.6rem;font-weight:600;
-  color:var(--p);padding:5px 12px;border-radius:20px;background:var(--pl);border:1px solid var(--pm);}
-.ghdr-dot{width:6px;height:6px;border-radius:50%;background:var(--p);animation:lb 2s ease-in-out infinite;}
-@keyframes lb{0%,100%{opacity:1}50%{opacity:.4}}
-.ghdr-pill{font-size:.6rem;font-weight:600;color:var(--t3);padding:5px 12px;
-  border-radius:20px;background:var(--bg);border:1px solid var(--bd);}
-/* TICKER */
-.gticker{background:var(--pl);border-bottom:1px solid var(--pm);padding:6px 0;overflow:hidden;position:relative;}
-.gticker::before,.gticker::after{content:'';position:absolute;top:0;width:80px;height:100%;z-index:2;}
-.gticker::before{left:0;background:linear-gradient(90deg,var(--pl),transparent);}
-.gticker::after{right:0;background:linear-gradient(270deg,var(--pl),transparent);}
-.gticker-track{display:inline-block;white-space:nowrap;animation:tick 65s linear infinite;
-  font-size:.58rem;letter-spacing:.8px;text-transform:uppercase;}
-.gticker-track:hover{animation-play-state:paused;}
-.ti{color:var(--t4);}.ti.hi{color:var(--p);font-weight:600;}
-.tsep{margin:0 24px;color:var(--pm);}
-@keyframes tick{from{transform:translateX(0)}to{transform:translateX(-50%)}}
-/* SIDEBAR */
-[data-testid="stSidebar"]{background:#fff!important;border-right:1px solid var(--bd)!important;
-  min-width:256px!important;max-width:256px!important;}
-[data-testid="stSidebar"]>div:first-child{padding:0!important;}
-.sb-top{padding:20px 18px 16px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:11px;}
-.sb-logo{width:32px;height:32px;background:var(--pl);border-radius:var(--r2);
-  display:grid;place-items:center;flex-shrink:0;border:1px solid var(--pm);}
-.sb-name{font-family:var(--fh);font-size:.85rem;font-weight:700;color:var(--t1);}
-.sb-name span{color:var(--p);font-weight:500;}
-.sb-ver{font-size:.56rem;color:var(--t4);margin-top:2px;}
-.sb-sec{padding:16px 18px 6px;font-size:.58rem;font-weight:600;color:var(--t4)!important;
-  text-transform:uppercase;letter-spacing:1.5px;}
-.sb-div{height:1px;background:var(--bd);margin:4px 16px;}
-.sync-row{display:flex;align-items:center;justify-content:space-between;
-  padding:6px 18px;border-radius:var(--r);margin:1px 6px;}
-.sync-row:hover{background:var(--bg);}
-.sync-lbl{font-size:.7rem;color:var(--t2);font-weight:500;}
-.tag{font-size:.56rem;font-weight:600;padding:2px 9px;border-radius:20px;}
-.tok{background:#F0FDF4;color:#16A34A;border:1px solid #BBF7D0;}
-.terr{background:#FFF1F2;color:#DC2626;border:1px solid #FECACA;}
-.twait{background:#F8FAFC;color:var(--t4);border:1px solid var(--bd);}
-/* BUTTONS */
-[data-testid="stButton"]>button{background:var(--p)!important;color:#fff!important;border:none!important;
-  border-radius:var(--r)!important;font-size:.72rem!important;font-weight:600!important;
-  padding:9px 20px!important;transition:all .15s!important;}
-[data-testid="stButton"]>button:hover{background:var(--p2)!important;transform:translateY(-1px)!important;}
-[data-testid="stDownloadButton"]>button{background:#fff!important;color:var(--t2)!important;
-  border:1px solid var(--bd)!important;border-radius:var(--r)!important;
-  font-size:.7rem!important;font-weight:500!important;padding:9px 20px!important;}
-/* TABS */
-[data-testid="stTabs"] [data-baseweb="tab-list"]{background:var(--bg)!important;border:1px solid var(--bd)!important;
-  border-radius:var(--r2)!important;gap:2px!important;padding:4px!important;margin-bottom:24px;}
-[data-testid="stTabs"] [data-baseweb="tab"]{font-size:.71rem!important;font-weight:500!important;
-  color:var(--t3)!important;padding:8px 18px!important;border-bottom:none!important;border-radius:var(--r)!important;}
-[data-testid="stTabs"] [aria-selected="true"]{color:var(--t1)!important;font-weight:600!important;
-  background:#fff!important;box-shadow:0 1px 3px rgba(0,0,0,.08)!important;}
-/* MISC */
-.gsec{display:flex;align-items:center;gap:10px;font-size:.65rem;font-weight:600;color:var(--t3);
-  text-transform:uppercase;letter-spacing:.8px;margin:8px 0 16px;}
-.gsec::after{content:'';flex:1;height:1px;background:var(--bd);}
-.norm-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:20px;
-  padding:9px 14px;background:#fff;border:1px solid var(--bd);border-radius:var(--r);}
-.norm-cap{font-size:.56rem;font-weight:600;color:var(--t4);text-transform:uppercase;
-  letter-spacing:1.5px;margin-right:6px;}
-.npill{font-size:.6rem;font-weight:500;padding:3px 11px;border-radius:20px;
-  background:var(--bg);border:1px solid var(--bd);color:var(--t4);}
-.npill.on{background:var(--pl);border-color:var(--pm);color:var(--p2);}
-[data-testid="stDataFrame"]{border:1px solid var(--bd)!important;border-radius:var(--r)!important;}
-[data-testid="stDataFrame"] th{background:#FAFAFA!important;font-size:.64rem!important;
-  font-weight:600!important;color:var(--t4)!important;text-transform:uppercase!important;}
-[data-testid="stDataFrame"] td{font-size:.71rem!important;color:var(--t2)!important;}
-/* AGENT CARDS */
-.p2-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:20px;margin-bottom:32px;}
-.p2-card{background:#fff;border:1px solid #D1D9E0;border-radius:20px;overflow:hidden;
-  display:flex;flex-direction:column;
-  transition:box-shadow .25s,transform .25s;cursor:default;
-  box-shadow:0 2px 8px rgba(0,0,0,.07);}
-.p2-card:hover{transform:translateY(-5px);box-shadow:0 20px 48px -8px rgba(13,148,136,.22);}
-.p2-banner{background:linear-gradient(135deg,#0D9488 0%,#064E3B 100%);
-  padding:22px 20px 18px;display:flex;align-items:center;gap:16px;
-  position:relative;overflow:hidden;}
-.p2-banner::after{content:'';position:absolute;right:-20px;top:-20px;width:100px;height:100px;
-  background:rgba(255,255,255,.06);border-radius:50%;}
-.p2-card.oth .p2-banner{background:linear-gradient(135deg,#475569 0%,#1E293B 100%);}
-.p2av{width:60px;height:60px;border-radius:50%;display:flex;align-items:center;justify-content:center;
-  font-family:var(--fd);font-size:1.1rem;font-weight:800;color:#fff;
-  background:rgba(255,255,255,.18);border:3px solid rgba(255,255,255,.35);flex-shrink:0;z-index:1;}
-.p2av.photo{background:#E2E8F0;padding:0;overflow:hidden;border:3px solid rgba(255,255,255,.55);}
-.p2av.photo img{width:100%;height:100%;object-fit:cover;object-position:center 8%;
-  transform:scale(1.35);transform-origin:center 20%;border-radius:50%;}
-.p2-bi{flex:1;min-width:0;z-index:1;}
-.p2-name{font-family:var(--fh);font-size:1.15rem;font-weight:800;color:#fff;
-  line-height:1.2;letter-spacing:-.3px;}
-.p2-role{font-size:.62rem;color:rgba(255,255,255,.65);margin-top:3px;font-weight:500;}
-.p2-sh{display:inline-flex;align-items:center;gap:5px;margin-top:9px;
-  background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);
-  border-radius:20px;padding:4px 10px;}
-.p2-sh-dot{width:5px;height:5px;border-radius:50%;background:#2DD4BF;}
-.p2-sh-txt{font-size:.62rem;font-weight:600;color:rgba(255,255,255,.95);white-space:nowrap;}
-.p2-body{padding:16px 18px 8px;display:flex;flex-direction:column;flex:1;}
-.p2-slbl{font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;
-  color:var(--t3);margin:12px 0 8px;display:flex;align-items:center;gap:8px;}
-.p2-slbl::after{content:'';flex:1;height:1px;background:#E8EEF3;}
-.p2-mg{display:grid;grid-template-columns:1fr 1fr;gap:2px;background:#E8EEF3;
-  border-radius:12px;overflow:hidden;border:1px solid #E8EEF3;}
-.p2-mr{background:#fff;padding:12px 14px 10px;display:flex;flex-direction:column;gap:2px;}
-.p2-mr:hover{background:#F0FDF9;}
-.p2m-top{display:flex;align-items:center;gap:5px;margin-bottom:3px;}
-.p2m-ic{font-size:.75rem;}
-.p2m-lb{font-size:.58rem;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--t4);}
-.p2m-v{font-family:var(--fd);font-size:1.3rem;font-weight:800;color:var(--t1);
-  letter-spacing:-.6px;line-height:1;}
-.p2m-h{font-size:.58rem;color:var(--t3);margin-top:2px;font-weight:500;}
-.p2-bar{height:4px;background:#EEF2FF;border-radius:10px;overflow:hidden;margin-top:6px;}
-.p2-bf{height:100%;border-radius:10px;background:linear-gradient(90deg,#0D9488,#2DD4BF);
-  transition:width .7s cubic-bezier(.4,0,.2,1);}
-.p2-card.oth .p2-bf{background:linear-gradient(90deg,#94A3B8,#CBD5E1);}
-.p2-ms{display:grid;grid-template-columns:1fr 1fr;gap:2px;
-  background:#BAE6FD;border-radius:12px;border:1px solid #BAE6FD;overflow:hidden;margin-top:12px;}
-.p2-card.oth .p2-ms{background:#E2E8F0;border-color:#CBD5E1;}
-.p2-ml,.p2-mr2{background:#F0F9FF;padding:11px 14px;}
-.p2-card.oth .p2-ml,.p2-card.oth .p2-mr2{background:#F8FAFC;}
-.p2-mr2{text-align:right;}
-.p2-mslb{font-size:.58rem;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#0369A1;}
-.p2-card.oth .p2-mslb{color:var(--t3);}
-.p2-msv{font-family:var(--fd);font-size:1.2rem;font-weight:800;line-height:1.1;
-  margin-top:3px;color:var(--t1);}
-.p2-ft{padding:12px 18px 16px;border-top:1px solid #EEF2F7;background:#FAFCFE;}
-.p2-ftlb{font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;
-  color:var(--t4);margin-bottom:7px;}
-.p2-sr{display:flex;align-items:center;justify-content:space-between;gap:8px;
-  background:var(--pl);border:1px solid var(--pm);border-radius:10px;padding:8px 12px;}
-.p2-card.oth .p2-sr{background:#F1F5F9;border-color:var(--bd);}
-.p2-sn{font-size:.68rem;font-weight:600;color:var(--p2);overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap;flex:1;}
-.p2-srn{font-size:.63rem;font-weight:700;color:var(--p);background:#fff;
-  padding:3px 9px;border-radius:12px;border:1px solid var(--pm);flex-shrink:0;}
-</style>
-"""
-st.markdown(_CSS, unsafe_allow_html=True)
+def _get_cookie_ctrl():
+    if not _COOKIE_OK:
+        return None
+    if "_cookie_ctrl" not in st.session_state:
+        st.session_state["_cookie_ctrl"] = CookieController()
+    return st.session_state["_cookie_ctrl"]
 
-st.markdown("""<script>
-(function(){
-  const M="38px",sels=['[data-testid="stMainBlockContainer"]','.main .block-container'];
-  function fix(){sels.forEach(s=>document.querySelectorAll(s).forEach(el=>{
-    el.style.setProperty('padding-left',M,'important');
-    el.style.setProperty('padding-right',M,'important');
-    el.style.setProperty('max-width','100%','important');
-  }));}
-  fix();new MutationObserver(fix).observe(document.body,{childList:true,subtree:true});
-})();
-</script>""", unsafe_allow_html=True)
 
-# ── Header & Ticker ───────────────────────────────────────────────────────────
-st.markdown("""
-<div class="ghdr">
-  <div class="ghdr-brand">
-    <div class="ghdr-logo">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0D9488"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-        <polyline points="9 22 9 12 15 12 15 22"/>
-      </svg>
-    </div>
-    <div>
-      <div class="ghdr-name">Hotel <span>Intelligence</span></div>
-      <div class="ghdr-sub">MTT &nbsp;·&nbsp; Opsifin &nbsp;·&nbsp; Travel Analytics</div>
-    </div>
-  </div>
-  <div class="ghdr-right">
-    <span class="ghdr-pill">v9.3</span>
-    <div class="ghdr-live"><span class="ghdr-dot"></span>Live</div>
-  </div>
-</div>
-<div class="gticker"><div class="gticker-track">
-  <span class="ti hi">Hotel Intelligence Platform</span><span class="tsep">·</span>
-  <span class="ti">Invoice &amp; Supplier Analytics</span><span class="tsep">·</span>
-  <span class="ti hi">Agent Scorecard Dashboard</span><span class="tsep">·</span>
-  <span class="ti">Supplier Category Intelligence</span><span class="tsep">·</span>
-  <span class="ti hi">MTT Travel Analytics · v9.3 · 2025</span><span class="tsep">·</span>
-  <span class="ti hi">Hotel Intelligence Platform</span><span class="tsep">·</span>
-  <span class="ti">Invoice &amp; Supplier Analytics</span><span class="tsep">·</span>
-  <span class="ti hi">Agent Scorecard Dashboard</span><span class="tsep">·</span>
-  <span class="ti">Supplier Category Intelligence</span><span class="tsep">·</span>
-  <span class="ti hi">MTT Travel Analytics · v9.3 · 2025</span><span class="tsep">·</span>
-</div></div>""", unsafe_allow_html=True)
-
-# ── Pre-sidebar: rebuild ──────────────────────────────────────────────────────
-_up_raw = st.session_state.get("main_upload") or []
-_up     = [f for f in _up_raw if _is_valid_file(f)]
-_nm     = st.session_state.get("norm_maps", {})
-if _up:
-    maybe_rebuild_df(_up, _nm)
-elif not _up_raw:
-    for k in ["df_raw","upload_hash"]:
-        st.session_state.pop(k, None)
-
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("""
-    <div class="sb-top">
-      <div class="sb-logo">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#0D9488"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-          <polyline points="9 22 9 12 15 12 15 22"/>
-        </svg>
-      </div>
-      <div>
-        <div class="sb-name">Hotel <span>Report</span></div>
-        <div class="sb-ver">Opsifin · MTT · v9.3</div>
-      </div>
-    </div>""", unsafe_allow_html=True)
-
-    st.markdown('<div class="sb-sec">Data Utama</div>', unsafe_allow_html=True)
-    st.file_uploader("Upload Custom Report (.xlsx)", type=["xlsx"],
-                     accept_multiple_files=True, key="main_upload",
-                     label_visibility="collapsed")
-
-    st.markdown('<div class="sb-div"></div><div class="sb-sec">Normalisasi · Google Drive</div>', unsafe_allow_html=True)
-    _ss = st.session_state.get("sync_state", {})
-    for k, lbl in GDRIVE_LABELS.items():
-        s  = _ss.get(k, "wait")
-        tc = {"ok":"tag tok","err":"tag terr","wait":"tag twait"}[s]
-        tt = {"ok":"Synced","err":"Error","wait":"Pending"}[s]
-        st.markdown(f'<div class="sync-row"><span class="sync-lbl">{lbl}</span><span class="{tc}">{tt}</span></div>',
-                    unsafe_allow_html=True)
-
-    st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
-    if st.button("🔄  Sync Data", use_container_width=True, key="btn_sync"):
-        nm2, ns2 = fetch_all_mappings_parallel()
-        st.session_state["sync_state"] = ns2
-        st.session_state["norm_maps"]  = nm2
-        for k in ["df_raw","upload_hash"]:
-            st.session_state.pop(k, None)
-        if all(v=="ok" for v in ns2.values()):
-            st.toast("✅ Semua data normalisasi berhasil!", icon="✅")
-        else:
-            failed = [GDRIVE_LABELS[k] for k,v in ns2.items() if v!="ok"]
-            st.toast(f"⚠️ Gagal: {', '.join(failed)}", icon="⚠️")
+def _render_logout_button():
+    if st.button(
+        "Logout",
+        type="secondary",
+        use_container_width=True,
+        key="_auth_logout_btn",
+    ):
+        st.session_state["_auth_ok"] = False
+        st.session_state["_auth_login_time"] = 0
+        ctrl = _get_cookie_ctrl()
+        if ctrl:
+            try:
+                ctrl.remove(_COOKIE_NAME)
+            except:
+                pass
         st.rerun()
 
-    st.markdown('<div class="sb-div"></div><div class="sb-sec">Filter Data</div>', unsafe_allow_html=True)
-    if "df_raw" in st.session_state:
-        _r = st.session_state["df_raw"]
-        if "Issued_Year" in _r.columns:
-            yr = sorted(_r["Issued_Year"].dropna().unique().tolist())
-            st.multiselect("Tahun", yr, key="f_years")
-        if "Inv Date" in _r.columns and _r["Inv Date"].notna().any():
-            _imin = _r["Inv Date"].min().date()
-            _imax = _r["Inv Date"].max().date()
-            _id_raw = st.session_state.get("f_inv")
-            if _id_raw and hasattr(_id_raw,"__len__") and len(_id_raw)==2:
-                try: _id = [max(_id_raw[0],_imin), min(_id_raw[1],_imax)]
-                except: _id = [_imin, _imax]
-            else: _id = [_imin, _imax]
-            st.date_input("Periode Inv Date", value=_id, key="f_inv",
-                          min_value=_imin, max_value=_imax)
-        if "Check In" in _r.columns and _r["Check In"].notna().any():
-            _cmin = _r["Check In"].min().date()
-            _cmax = _r["Check In"].max().date()
-            _cd_raw = st.session_state.get("f_ci")
-            if _cd_raw and hasattr(_cd_raw,"__len__") and len(_cd_raw)==2:
-                try: _cd = [max(_cd_raw[0],_cmin), min(_cd_raw[1],_cmax)]
-                except: _cd = [_cmin, _cmax]
-            else: _cd = [_cmin, _cmax]
-            st.date_input("Check In Range", value=_cd, key="f_ci",
-                          min_value=_cmin, max_value=_cmax)
-    else:
-        st.caption("Upload file untuk mengaktifkan filter.")
 
-    st.markdown("""
-    <div style="padding:16px 18px 14px;border-top:1px solid #E2E8F0;margin-top:16px;">
-      <div style="font-size:.57rem;color:#94A3B8;line-height:2;">
-        Hotel Intelligence <span style="color:#0D9488;font-weight:600;">v9.3</span> · 2025<br>
-        Rifyal Tumber · MTT
-      </div>
-    </div>""", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════════════════════
-uploaded_files = [f for f in (st.session_state.get("main_upload") or []) if _is_valid_file(f)]
-
-if uploaded_files and "df_raw" in st.session_state:
-    df_raw = st.session_state["df_raw"]
-
-    # ── Filter ─────────────────────────────────────────────────────────────────
-    df_view = df_raw.copy()
-    sel_y = st.session_state.get("f_years", [])
-    if sel_y and "Issued_Year" in df_view.columns:
-        df_view = df_view[df_view["Issued_Year"].isin(sel_y)]
-    sel_i = st.session_state.get("f_inv", [])
-    if "Inv Date" in df_view.columns and isinstance(sel_i,(list,tuple)) and len(sel_i)==2:
-        df_view = df_view[
-            (df_view["Inv Date"] >= pd.to_datetime(sel_i[0])) &
-            (df_view["Inv Date"] <= pd.to_datetime(sel_i[1]))
-        ]
-    sel_c = st.session_state.get("f_ci", [])
-    if "Check In" in df_view.columns and isinstance(sel_c,(list,tuple)) and len(sel_c)==2:
-        df_view = df_view[
-            (df_view["Check In"] >= pd.to_datetime(sel_c[0])) &
-            (df_view["Check In"] <= pd.to_datetime(sel_c[1]))
-        ]
-
-    _vh = make_view_hash(df_view)
-
-    # Normalisasi pill
-    _ss2 = st.session_state.get("sync_state", {})
-    _pm_norm = {
-        "Hotel Chain":   _ss2.get("hotel_chain")=="ok",
-        "Hotel City":    _ss2.get("hotel_city")=="ok",
-        "Hotel Name":    _ss2.get("hotel_name")=="ok",
-        "Supplier":      _ss2.get("hotel_supplier")=="ok",
-        "Supplier Cat":  _ss2.get("supplier_category")=="ok",
-    }
-    ph = " ".join(
-        f'<span class="npill {"on" if v else ""}">{k}</span>'
-        for k, v in _pm_norm.items()
+def _render_footer():
+    st.markdown(
+        """
+<div style="margin-top:32px;padding:14px 0 8px;border-top:0.5px solid #ddd;
+    display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+  <div style="display:flex;align-items:center;gap:8px;">
+    <div style="width:24px;height:24px;border-radius:6px;overflow:hidden;flex-shrink:0;">
+      <div style="width:100%;height:100%;background:#191d3a;border-radius:6px;
+        display:flex;align-items:center;justify-content:center;color:#fddb32;
+        font-size:12px;font-weight:800;">M</div>
+    </div>
+    <div>
+      <div style="font-size:11px;font-weight:600;color:#191d3a;line-height:1.2;">
+        Intelligent Automation Scanner</div>
+      <div style="font-size:9px;color:#aaa;line-height:1.2;">v7 · Mitra Tours &amp; Travel</div>
+    </div>
+  </div>
+  <a href="https://www.linkedin.com/in/rifyalt" target="_blank"
+     style="display:flex;align-items:center;gap:5px;text-decoration:none;
+            font-size:10px;font-weight:500;color:#616161;
+            border:0.5px solid #e0e0e0;padding:4px 10px;border-radius:20px;background:#fff;">
+    Rifyal Tumber
+  </a>
+</div>""",
+        unsafe_allow_html=True,
     )
-    st.markdown(f'<div class="norm-bar"><span class="norm-cap">Norm</span>{ph}</div>',
-                unsafe_allow_html=True)
 
-    tab1,tab2,tab3,tab4,tab5,tab6,tab7 = st.tabs(
-        ["Summary","Tren Invoice","Supplier","Product Type","Agent","PTM Corp","Kategori"])
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 1 — SUMMARY
-    # ══════════════════════════════════════════════════════════════════════════
-    with tab1:
-        _tr  = len(df_view)
-        _tc  = len(df_view.columns)
-        _ui  = int(df_view["Invoice No"].nunique())                      if "Invoice No"       in df_view.columns else 0
-        _rn  = int(np.ceil(df_view["Total Room Night"].sum()))           if "Total Room Night" in df_view.columns else 0
-        _sa  = float(df_view["Sales AR"].fillna(0).astype(float).sum()) if "Sales AR"         in df_view.columns else 0.0
-        _up  = int(df_view["Full Name"].replace("",np.nan).dropna().nunique()) if "Full Name" in df_view.columns else 0
-        _pmv = None
-        if "Profit" in df_view.columns and "Sales AR" in df_view.columns:
-            _pp = df_view["Profit"].fillna(0).astype(float)
-            _ps = df_view["Sales AR"].fillna(0).astype(float)
-            _mm = _ps != 0
-            _pmv = float((_pp[_mm]/_ps[_mm]*100).mean()) if _mm.any() else 0.0
-        _aging = None
-        if "Check In" in df_view.columns and "Inv Date" in df_view.columns:
-            _ag = df_view.dropna(subset=["Check In","Inv Date"]).copy()
-            _ag["_d"] = (_ag["Check In"] - _ag["Inv Date"]).dt.days
-            _agp = _ag[_ag["_d"] >= 0]
-            if not _agp.empty: _aging = float(_agp["_d"].mean())
-        _tsup = int(df_view["Supplier_Name"].dropna().nunique()) if "Supplier_Name" in df_view.columns else 0
-        _thot = int(df_view["Hotel_Name"].dropna().nunique())    if "Hotel_Name"    in df_view.columns else 0
-        _tcit = int(df_view["Hotel_City"].dropna().nunique())    if "Hotel_City"    in df_view.columns else 0
-        _tpic = int(df_view["Agent"].dropna().nunique())         if "Agent"         in df_view.columns else 0
-        prev  = get_prev_period_metrics(df_raw, df_view)
-
-        def _badge(curr, pv, size="lg"):
-            neu = '<span style="display:inline-flex;align-items:center;gap:3px;font-size:.53rem;font-weight:600;padding:2px 7px;border-radius:20px;background:#F8FAFC;color:#94A3B8;border:1px solid #E2E8F0;">── No ref</span>'
+def _dashboard_login_wall():
+    ctrl = _get_cookie_ctrl()
+    if not st.session_state.get("_auth_ok") and ctrl:
+        try:
+            token = ctrl.get(_COOKIE_NAME)
+            if token and _verify_token(token):
+                st.session_state["_auth_ok"] = True
+                st.session_state["_auth_login_time"] = time.time()
+        except:
+            pass
+    if st.session_state.get("_auth_ok"):
+        elapsed = time.time() - st.session_state.get("_auth_login_time", 0)
+        if elapsed < _ttl_hours() * 3600:
+            return True
+        st.session_state["_auth_ok"] = False
+        if ctrl:
             try:
-                if curr is None or pv is None: return neu
-                c = float(curr); p = float(pv)
-                if p == 0: return neu
-                pct = (c-p)/abs(p)*100
-                is_up = pct > 0
-                arr = "▲" if pct > 0 else "▼"
-                bg  = "#ECFDF5" if is_up else "#FFF1F2"
-                col = "#059669" if is_up else "#DC2626"
-                bdr = "#A7F3D0" if is_up else "#FECACA"
-                fs  = "font-size:.53rem;" if size=="sm" else "font-size:.58rem;"
-                return f'<span style="display:inline-flex;align-items:center;gap:3px;{fs}font-weight:700;padding:2px 8px;border-radius:20px;background:{bg};color:{col};border:1px solid {bdr};">{arr} {abs(pct):.1f}%</span>'
+                ctrl.remove(_COOKIE_NAME)
             except:
-                return neu
+                pass
+    ttl = int(_ttl_hours())
+    _err = st.session_state.get("_dash_err", "")
+    st.markdown(
+        f"""
+<style>
+.dash-lock-wrap{{display:flex;flex-direction:column;align-items:center;padding:48px 16px 8px;text-align:center}}
+.dash-lock-icon{{width:52px;height:52px;border-radius:16px;background:#fff;border:1px solid #e4e4e4;
+    display:flex;align-items:center;justify-content:center;margin-bottom:16px;font-size:22px}}
+.dash-lock-title{{font-size:18px;font-weight:700;color:#191d3a;margin-bottom:4px}}
+.dash-lock-sub{{font-size:13px;color:#aaa;margin-bottom:28px}}
+.dash-lock-err{{font-size:12px;color:#e53935;margin-bottom:8px;min-height:16px;text-align:center}}
+.dash-lock-foot{{font-size:11px;color:#ccc;margin-top:12px;margin-bottom:4px;text-align:center}}
+</style>
+<div class="dash-lock-wrap">
+  <div class="dash-lock-icon">🔒</div>
+  <div class="dash-lock-title">Welcome</div>
+  <div class="dash-lock-sub">Masukkan password untuk melanjutkan</div>
+</div>
+<div class="dash-lock-err">{_err}</div>""",
+        unsafe_allow_html=True,
+    )
+    _col_l, _col_c, _col_r = st.columns([1, 2, 1])
+    with _col_c:
+        pw = st.text_input(
+            "Password",
+            type="password",
+            placeholder="Password",
+            label_visibility="collapsed",
+            key="_dash_pw_input",
+        )
+        _btn = st.button(
+            "Login",
+            type="primary",
+            use_container_width=True,
+            key="_dash_login_btn",
+        )
+    if _btn:
+        if _check_pw(pw):
+            st.session_state["_auth_ok"] = True
+            st.session_state["_auth_login_time"] = time.time()
+            st.session_state["_dash_err"] = ""
+            ctrl2 = _get_cookie_ctrl()
+            if ctrl2:
+                try:
+                    ctrl2.set(
+                        _COOKIE_NAME,
+                        _make_token(),
+                        max_age=int(_ttl_hours() * 3600),
+                    )
+                except:
+                    pass
+            st.rerun()
+        else:
+            st.session_state["_dash_err"] = "Password salah. Coba lagi."
+            st.rerun()
+    st.markdown(
+        f'<div class="dash-lock-foot">Sesi aktif {ttl} jam</div>',
+        unsafe_allow_html=True,
+    )
+    return False
 
-        def _ctr(v):
-            if v is None: return "N/A"
-            f = float(v); a = abs(f)
-            if a >= 1e9: return f'<span style="font-family:\'Sora\',sans-serif;">{f/1e9:.1f}B</span>'
-            if a >= 1e6: return f'<span style="font-family:\'Sora\',sans-serif;">{f/1e6:.1f}M</span>'
-            if a >= 1e3: return f'<span style="font-family:\'Sora\',sans-serif;">{f/1e3:.1f}K</span>'
-            return f'<span style="font-family:\'Sora\',sans-serif;">{int(f):,}</span>'
 
-        def _hero(icon, label, val_html, sub, badge, accent="linear-gradient(90deg,#0D9488,#134E4A)"):
-            return (
-                f'<div style="background:#fff;border:1px solid #E2E8F0;border-radius:14px;overflow:hidden;'
-                f'transition:box-shadow .2s,transform .2s;" '
-                f'onmouseover="this.style.transform=\'translateY(-3px)\';this.style.boxShadow=\'0 12px 32px -6px rgba(13,148,136,.16)\'" '
-                f'onmouseout="this.style.transform=\'\';this.style.boxShadow=\'\'">'
-                f'<div style="height:3px;background:{accent};"></div>'
-                f'<div style="padding:18px 20px 16px;">'
-                f'<div style="width:38px;height:38px;border-radius:10px;display:grid;place-items:center;'
-                f'margin-bottom:12px;font-size:1.1rem;background:#F0FDFA;border:1px solid #CCFBF1;">{icon}</div>'
-                f'<div style="font-size:.55rem;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;'
-                f'color:#94A3B8;margin-bottom:6px;">{label}</div>'
-                f'<div style="font-size:2rem;font-weight:800;line-height:1;letter-spacing:-1.5px;'
-                f'color:#0F172A;margin-bottom:4px;">{val_html}</div>'
-                f'<div style="font-size:.58rem;color:#94A3B8;margin-bottom:10px;">{sub}</div>'
-                f'{badge}</div></div>'
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CSS
+# ═══════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body,[data-testid="stAppViewContainer"],[data-testid="stAppViewBlockContainer"],.main{
+    background:#ededed !important;font-family:'Inter',system-ui,sans-serif !important}
+.main .block-container{
+    padding:8px 8px 100px !important;max-width:480px !important;margin:0 auto !important}
+[data-testid="stSidebar"],#MainMenu,footer,header,[data-testid="stDecoration"]{display:none !important}
+*{font-family:'Inter',system-ui,sans-serif !important;-webkit-tap-highlight-color:transparent}
+.main .block-container{
+    padding-bottom:max(100px, calc(80px + env(safe-area-inset-bottom))) !important;
+    padding-left:max(8px, env(safe-area-inset-left)) !important;
+    padding-right:max(8px, env(safe-area-inset-right)) !important}
+.app-header{background:#191d3a;border-radius:16px;padding:12px 14px;
+    display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.ah-icon{width:40px;height:40px;border-radius:11px;background:#fddb32;
+    display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+.ah-title{font-size:16px;font-weight:800;color:#fff;line-height:1.2}
+.ah-sub{font-size:11px;color:#9e9e9e;margin-top:1px}
+.ah-live{margin-left:auto;font-size:9px;font-weight:700;letter-spacing:.4px;
+    background:#0f2310;color:#4ade80;border:1px solid #1e4620;
+    padding:4px 9px;border-radius:20px;display:flex;align-items:center;gap:4px;white-space:nowrap;flex-shrink:0}
+.ah-live::before{content:'';width:5px;height:5px;border-radius:50%;background:#4ade80;display:block}
+.ah-ai-badge{font-size:9px;font-weight:700;letter-spacing:.3px;
+    padding:3px 8px;border-radius:20px;white-space:nowrap;flex-shrink:0;margin-left:4px}
+.ah-ai-openai{background:#0d1f12;color:#4ade80;border:1px solid #1e4620}
+.ah-ai-claude{background:#1a1020;color:#c084fc;border:1px solid #6b21a8}
+.nb-wrap .stButton>button{
+    height:56px !important;border-radius:12px !important;
+    border:none !important;background:transparent !important;
+    color:#9e9e9e !important;font-size:9px !important;font-weight:600 !important;
+    padding:4px 2px !important;line-height:1.4 !important;
+    box-shadow:none !important;width:100% !important;
+    display:flex;flex-direction:column;align-items:center}
+.nb-wrap .stButton>button:hover{background:#f5f5f5 !important;color:#191d3a !important}
+.nb-wrap .stButton>button[kind="primary"]{
+    background:#f0f0f0 !important;color:#191d3a !important;
+    border-bottom:2.5px solid #191d3a !important}
+.sec-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;
+    color:#9e9e9e;margin:14px 0 8px;padding-bottom:6px;border-bottom:1.5px solid #ddd}
+label[data-testid="stWidgetLabel"] p,label[data-testid="stWidgetLabel"]{
+    font-size:12px !important;font-weight:600 !important;color:#191d3a !important;
+    text-transform:none !important;letter-spacing:0 !important;margin-bottom:3px !important}
+.stTextInput input,.stNumberInput input{
+    border-radius:12px !important;border:1.5px solid #ddd !important;
+    background:#fff !important;font-size:16px !important;color:#191d3a !important;
+    padding:0 14px !important;height:52px !important;line-height:52px !important;
+    box-sizing:border-box !important;width:100% !important;
+    -webkit-appearance:none;appearance:none}
+.stTextInput input:focus,.stNumberInput input:focus{
+    border-color:#6398c8 !important;background:#fff !important;
+    box-shadow:0 0 0 3px rgba(99,152,200,.18) !important;outline:none !important}
+.stTextInput input::placeholder{font-size:14px !important;color:#bbb !important}
+[data-testid="stSelectbox"]>div>div{
+    border-radius:12px !important;border:1.5px solid #ddd !important;
+    background:#fff !important;font-size:16px !important;color:#191d3a !important;
+    height:52px !important;min-height:52px !important;
+    display:flex !important;align-items:center !important;box-sizing:border-box !important}
+[data-testid="stHorizontalBlock"]{
+    gap:8px !important;align-items:flex-start !important;
+    flex-wrap:nowrap !important;overflow:visible !important}
+[data-testid="stHorizontalBlock"]>[data-testid="column"]{
+    flex:1 1 0% !important;min-width:0 !important;
+    max-width:none !important;overflow:visible !important;padding-bottom:4px !important}
+.stButton>button{
+    width:100% !important;border-radius:14px !important;
+    height:52px !important;font-size:15px !important;
+    font-weight:700 !important;border:none !important;
+    min-height:44px !important;touch-action:manipulation}
+.stButton>button[kind="primary"]{
+    background:#1668e3 !important;color:#fff !important;box-shadow:none !important}
+.stButton>button[kind="secondary"]{
+    background:#fff !important;border:1.5px solid #ddd !important;color:#616161 !important}
+.bb-wrap .stButton>button[kind="secondary"]{
+    background:transparent !important;border:none !important;
+    color:#9e9e9e !important;font-size:12px !important;
+    font-weight:400 !important;height:36px !important;
+    text-decoration:underline !important;text-underline-offset:3px !important}
+[data-testid="stLinkButton"] a{
+    background:#6398c8 !important;color:#fff !important;
+    border-radius:14px !important;height:52px !important;
+    font-size:14px !important;font-weight:700 !important;border:none !important;
+    display:flex !important;align-items:center !important;
+    justify-content:center !important;text-decoration:none !important}
+.mode-toggle{display:grid;grid-template-columns:1fr 1fr;gap:0;
+    background:#e4e4e4;border-radius:14px;padding:3px;margin-bottom:12px}
+.mode-toggle .stButton>button{
+    height:44px !important;border-radius:11px !important;
+    font-size:13px !important;font-weight:600 !important;border:none !important;
+    box-shadow:none !important;background:transparent !important;color:#9e9e9e !important}
+.mode-toggle .stButton>button[kind="primary"]{
+    background:#fff !important;color:#191d3a !important;
+    box-shadow:0 1px 4px rgba(0,0,0,.12) !important}
+.notice{border-radius:12px;padding:10px 13px;font-size:13px;line-height:1.5;
+    display:flex;align-items:flex-start;gap:8px;margin-bottom:10px}
+.nok{background:#f0fdf4;border:1px solid #86efac;color:#166534}
+.nerr{background:#fff1f2;border:1px solid #fecdd3;color:#9f1239}
+.ninfo{background:#e8f0fe;border:1px solid #6398c8;color:#1e3a6e}
+.nwarn{background:#fffbeb;border:1px solid #fde68a;color:#92400e}
+.nviolet{background:#faf5ff;border:1px solid #d8b4fe;color:#6b21a8}
+.expedia-banner{background:#fff;border:1.5px solid #ddd;border-bottom:none;
+    border-radius:16px 16px 0 0;padding:11px 14px;
+    display:flex;align-items:center;justify-content:space-between;margin-top:14px}
+.taap-pill{font-size:10px;font-weight:700;letter-spacing:.3px;
+    color:#1e3a6e;background:#e8f0fe;border:1px solid #6398c8;
+    padding:3px 10px;border-radius:20px;white-space:nowrap}
+[data-testid="stFileUploader"] [data-testid="stWidgetLabel"],
+[data-testid="stFileUploader"] [data-testid="stWidgetLabel"] *{display:none !important}
+[data-testid="stFileUploader"]{margin-top:0 !important}
+[data-testid="stFileUploader"]>div:first-child,[data-testid="stFileUploader"] section{
+    border:1.5px dashed #b8cde0 !important;border-top:none !important;
+    border-radius:0 0 16px 16px !important;background:#f5f8fc !important;
+    margin-top:0 !important;padding:24px 16px !important;min-height:110px !important}
+[data-testid="stFileUploader"] button{
+    border-radius:10px !important;border:1.5px solid #ddd !important;
+    background:#fff !important;color:#191d3a !important;
+    font-size:14px !important;font-weight:600 !important;
+    padding:10px 20px !important;height:auto !important;min-height:44px !important}
+[data-testid="stFileUploaderDropInstructions"]{font-size:14px !important;font-weight:600 !important;color:#191d3a !important}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+.stat-card{background:#fff;border:1.5px solid #ddd;border-radius:16px;padding:14px 13px}
+.stat-val{font-size:20px;font-weight:800;color:#191d3a;line-height:1.1}
+.stat-lbl{font-size:10px;color:#9e9e9e;margin-top:4px;font-weight:500}
+.bulk-prog{background:#ddd;border-radius:99px;height:5px;overflow:hidden;margin-bottom:6px}
+.bulk-prog-f{height:100%;background:#6398c8;border-radius:99px;transition:width .3s}
+.bulk-prog-lbl{font-size:12px;color:#9e9e9e;text-align:center;margin-bottom:12px;font-weight:500}
+.bulk-sum{background:#fff;border:1.5px solid #ddd;border-radius:16px;padding:16px 14px;margin-bottom:14px}
+.bulk-sum-ttl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#9e9e9e;margin-bottom:12px}
+.bulk-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;text-align:center;margin-bottom:12px}
+.bs-val{font-size:22px;font-weight:800;color:#191d3a;line-height:1}
+.bs-lbl{font-size:9px;color:#9e9e9e;margin-top:3px;font-weight:500}
+.bs-g{color:#1e9e5a}.bs-r{color:#e53935}.bs-y{color:#e68900}
+.bulk-bar{background:#e8e8e8;border-radius:99px;height:5px;overflow:hidden}
+.bulk-bar-f{height:100%;background:#1e9e5a;border-radius:99px}
+.bulk-pct{font-size:11px;color:#9e9e9e;text-align:right;margin-top:4px}
+.file-item{background:#fff;border:1.5px solid #ddd;border-radius:14px;padding:12px 13px;margin-bottom:8px}
+.fi-success{border-color:#6ee7b7 !important;background:#f0fdf4 !important}
+.fi-error{border-color:#fca5a5 !important;background:#fff1f2 !important}
+.fi-skipped{border-color:#fcd34d !important;background:#fffde7 !important}
+.fi-top{display:flex;align-items:center;gap:9px}
+.fi-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+.ic-ok{background:#dcfce7}.ic-err{background:#ffe4e6}.ic-skip{background:#fef9c3}.ic-n{background:#ededed}
+.fi-name{font-size:12px;font-weight:600;color:#191d3a;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fi-badge{font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;white-space:nowrap}
+.fb-ok{background:#dcfce7;color:#166534}.fb-err{background:#ffe4e6;color:#9f1239}.fb-sk{background:#fef9c3;color:#7a5c00}
+.fi-grid{margin-top:9px;padding-top:8px;border-top:1px solid #ededed;display:grid;grid-template-columns:1fr 1fr;gap:5px 12px}
+.fi-kv{display:flex;gap:4px;align-items:baseline}
+.fi-k{font-size:9px;font-weight:700;color:#9e9e9e;min-width:48px;flex-shrink:0;text-transform:uppercase;letter-spacing:.3px}
+.fi-v{font-size:12px;font-weight:500;color:#191d3a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st-row{display:flex;align-items:center;gap:10px;background:#fff;
+    border:1.5px solid #ddd;border-radius:14px;padding:12px 13px;margin-bottom:8px}
+.st-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
+.si-g{background:#f0fdf4}.si-r{background:#fff1f2}.si-b{background:#e8f0fe}.si-y{background:#fffde7}
+.st-body{flex:1;min-width:0}
+.st-title{font-size:13px;font-weight:700;color:#191d3a;line-height:1}
+.st-sub{font-size:11px;color:#9e9e9e;margin-top:2px}
+.st-badge{display:inline-flex;align-items:center;font-size:10px;font-weight:700;padding:3px 10px;border-radius:20px;flex-shrink:0}
+.bg{background:#f0fdf4;color:#166534;border:1px solid #86efac}
+.br{background:#fff1f2;color:#9f1239;border:1px solid #fecdd3}
+.by{background:#fffde7;color:#7a5c00;border:1px solid #fcd34d}
+.ai-card-btn-wrap .stButton>button{
+    height:52px !important;border-radius:14px !important;font-size:14px !important;
+    font-weight:500 !important;padding:0 14px !important;margin-bottom:8px !important}
+.ai-card-btn-wrap .stButton>button[kind="secondary"]{
+    background:#fff !important;border:1px solid #e0e0e0 !important;color:#191d3a !important;box-shadow:none !important}
+.ai-card-btn-wrap .stButton>button[kind="primary"]{
+    background:#f0fdf4 !important;border:1.5px solid #1D9E75 !important;color:#191d3a !important;box-shadow:none !important}
+.ai-status-bar{display:flex;align-items:center;gap:8px;padding:9px 13px;
+    border-radius:10px;background:#f0fdf4;border:1px solid #bbf7d0;margin-bottom:16px}
+.ai-status-dot{width:6px;height:6px;border-radius:50%;background:#1D9E75;flex-shrink:0}
+.ai-status-txt{font-size:12px;color:#166534}
+.ai-key-row{display:flex;align-items:center;justify-content:space-between;
+    padding:10px 13px;border-radius:10px;background:#fff;border:1px solid #e8e8e8;margin-bottom:6px}
+.ai-key-left{display:flex;align-items:center;gap:8px}
+.ai-key-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.ai-key-name{font-size:13px;color:#191d3a}
+.ai-key-ok{font-size:11px;color:#1D9E75}
+.ai-key-warn{font-size:11px;color:#e68900}
+.about-box{background:#fff;border:1.5px solid #ddd;border-radius:16px;padding:14px 16px}
+.about-ttl{font-size:14px;font-weight:800;color:#191d3a;margin-bottom:12px}
+.about-r{display:flex;gap:8px;margin-bottom:6px}
+.about-k{font-size:11px;font-weight:700;color:#191d3a;width:72px;flex-shrink:0}
+.about-v{font-size:11px;color:#616161;line-height:1.5}
+[data-testid="stDataFrame"]{border-radius:14px !important;border:1.5px solid #ddd !important;overflow:hidden !important;box-shadow:none !important}
+[data-testid="stDataFrame"] th{background:#f5f8fc !important;color:#616161 !important;font-size:10px !important;font-weight:700 !important;text-transform:uppercase !important;letter-spacing:.4px !important;border-bottom:1.5px solid #ddd !important;padding:9px 11px !important}
+[data-testid="stDataFrame"] td{font-size:12px !important;color:#191d3a !important;padding:9px 11px !important;border-bottom:1px solid #ededed !important}
+[data-testid="stDataFrame"] tr:hover td{background:#f5f8fc !important}
+.stSpinner>div{border-top-color:#6398c8 !important}
+[data-testid="stDateInput"] input{
+    font-size:15px !important;height:52px !important;
+    border-radius:12px !important;border:1.5px solid #ddd !important;
+    padding:0 14px !important;-webkit-appearance:none;appearance:none}
+/* Speed badge */
+.spd-badge{display:inline-flex;align-items:center;gap:5px;
+    font-size:10px;font-weight:700;padding:3px 10px;border-radius:20px;
+    background:#fef9c3;color:#7a5c00;border:1px solid #fcd34d;margin-left:6px}
+@media(max-width:430px) and (orientation:portrait){
+  .main .block-container{
+    padding:6px 10px max(90px,calc(72px + env(safe-area-inset-bottom))) !important;
+    max-width:100vw !important}
+  [data-testid="stHorizontalBlock"]{flex-wrap:wrap !important;gap:6px !important}
+  [data-testid="stHorizontalBlock"]>[data-testid="column"]{
+    flex:1 1 100% !important;min-width:100% !important;max-width:100% !important}
+}
+@media screen and (orientation:landscape){
+  [data-testid="stHorizontalBlock"]{flex-wrap:nowrap !important}
+  .main .block-container{max-width:600px !important}
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AI PROVIDER
+# ═══════════════════════════════════════════════════════════════════════════════
+def get_ai_provider():
+    return st.session_state.get("ai_provider", "claude")
+
+
+def get_openai_key():
+    try:
+        k = st.secrets["openai"]["api_key"]
+        if k and len(k) > 20 and "GANTI" not in k and "PASTE" not in k:
+            return k
+    except:
+        pass
+    return st.session_state.get("openai_key_manual", "")
+
+
+def get_claude_key():
+    try:
+        k = st.secrets["anthropic"]["api_key"]
+        if k and len(k) > 20 and "GANTI" not in k and "PASTE" not in k:
+            return k
+    except:
+        pass
+    return st.session_state.get("claude_key_manual", "")
+
+
+def active_ai_ready():
+    if get_ai_provider() == "openai":
+        return bool(get_openai_key())
+    return bool(get_claude_key())
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  GOOGLE SHEETS  — OPTIMIZED
+#  Perubahan utama:
+#    • get_all_values() ganti get_all_records()  → 3-5x lebih cepat
+#    • @st.cache_resource TTL 3600s (1 jam) untuk koneksi
+#    • @st.cache_data TTL 600s (10 menit) untuk DATA — bisa di-clear manual
+#    • GAS endpoint opsional sebagai fallback super-cepat
+# ═══════════════════════════════════════════════════════════════════════════════
+def sheet_id():
+    try:
+        s = st.secrets["google_sheets"]["sheet_id"]
+        if s and "GANTI" not in s:
+            return s
+    except:
+        pass
+    return st.session_state.get("sheet_id", "")
+
+
+def gas_url():
+    """Opsional: Google Apps Script Web App URL untuk load data super cepat."""
+    try:
+        u = st.secrets["google_sheets"].get("gas_url", "")
+        if u and u.startswith("https://script.google.com"):
+            return u
+    except:
+        pass
+    return st.session_state.get("gas_url", "")
+
+
+COLS = [
+    "Timestamp Input", "Supplier", "Booking ID", "Booking Date", "Issued Date",
+    "Hotel", "Check-in", "Room x Night", "Total (Rp)", "Check-out", "Guest Name",
+    "Kartu Kredit", "Issuer", "PIC", "No. BC", "Nama Kegiatan", "Catatan",
+]
+
+
+# ── Koneksi sheet — cache 1 jam ────────────────────────────────────────────────
+@st.cache_resource(ttl=3600)
+def ws():
+    creds = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]),
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    )
+    s = gspread.authorize(creds).open_by_key(sheet_id()).sheet1
+    try:
+        if not s.row_values(1) or s.cell(1, 1).value != COLS[0]:
+            s.insert_row(COLS, 1)
+    except:
+        s.insert_row(COLS, 1)
+    return s
+
+
+# ── OPTIMIZED: load data — cache_data 10 menit, bisa di-clear manual ──────────
+@st.cache_data(ttl=600, show_spinner=False)
+def load_rows_cached() -> list[dict]:
+    """
+    OPTIMIZATION 1: get_all_values() jauh lebih cepat dari get_all_records().
+    get_all_records() parsing tipe data per sel → lambat.
+    get_all_values() return string mentah → 3-5x lebih cepat.
+
+    OPTIMIZATION 2: Coba GAS endpoint dulu (jika dikonfigurasi) → paling cepat.
+    GAS berjalan di server Google, tidak perlu OAuth per request.
+    """
+    _gas = gas_url()
+    if _gas:
+        try:
+            r = requests.get(_gas, timeout=8)
+            if r.status_code == 200:
+                return r.json()
+        except:
+            pass  # fallback ke gspread
+
+    # Fallback: gspread dengan get_all_values() (bukan get_all_records())
+    sheet = ws()
+    raw = sheet.get_all_values()          # ← KUNCI: jauh lebih cepat
+    if not raw or len(raw) < 2:
+        return []
+    headers = raw[0]
+    return [dict(zip(headers, row)) for row in raw[1:]]
+
+
+def load_rows() -> list[dict]:
+    """Wrapper — dipanggil dari seluruh app."""
+    return load_rows_cached()
+
+
+def save_row(d: dict):
+    """Simpan baris baru, lalu invalidate cache data."""
+    ws().append_row(
+        [d.get(k, "") for k in [
+            "timestamp_input", "supplier", "booking_id", "booked_on", "issued_on",
+            "hotel", "checkin", "qty", "room", "checkout", "name", "card",
+            "issuer", "pic", "no_bc", "nama_kegiatan", "notes",
+        ]],
+        value_input_option="USER_ENTERED",
+    )
+    # PENTING: clear cache data setelah tulis, agar dashboard terbaru
+    load_rows_cached.clear()
+    # Reset DuckDB supaya sinkron
+    if _DUCK_OK:
+        _invalidate_duckdb()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DUCKDB — IN-MEMORY ENGINE untuk filter & agregasi
+#  Manfaat: query SQL columnar jauh lebih cepat dari pandas untuk data besar
+# ═══════════════════════════════════════════════════════════════════════════════
+@st.cache_resource
+def _get_duckdb_conn():
+    """DuckDB in-memory connection — di-cache sepanjang sesi Streamlit."""
+    if not _DUCK_OK:
+        return None
+    return duckdb.connect(database=":memory:", read_only=False)
+
+
+def _invalidate_duckdb():
+    """Hapus tabel hotel di DuckDB agar di-rebuild dari data terbaru."""
+    conn = _get_duckdb_conn()
+    if conn:
+        try:
+            conn.execute("DROP TABLE IF EXISTS hotel")
+        except:
+            pass
+    # Hapus flag agar di-rebuild saat berikutnya diakses
+    st.session_state.pop("_duck_loaded_hash", None)
+
+
+def _ensure_duckdb(rows: list[dict]):
+    """
+    Pastikan DuckDB memiliki tabel hotel yang up-to-date.
+    Gunakan hash jumlah baris sebagai fingerprint sederhana.
+    """
+    if not _DUCK_OK or not rows:
+        return
+    conn = _get_duckdb_conn()
+    if conn is None:
+        return
+
+    import pandas as pd
+
+    _hash = hashlib.md5(f"{len(rows)}:{rows[-1].get('Timestamp Input','')}".encode()).hexdigest()
+    if st.session_state.get("_duck_loaded_hash") == _hash:
+        return  # sudah sinkron, skip rebuild
+
+    df = pd.DataFrame(rows)
+    # Konversi kolom numerik
+    if "Total (Rp)" in df.columns:
+        df["Total (Rp)"] = pd.to_numeric(df["Total (Rp)"], errors="coerce").fillna(0).astype(int)
+    # Konversi tanggal untuk filter range
+    for col in ["Check-in", "Booking Date", "Issued Date"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    conn.execute("DROP TABLE IF EXISTS hotel")
+    conn.register("hotel_view", df)
+    conn.execute("CREATE TABLE hotel AS SELECT * FROM hotel_view")
+    conn.unregister("hotel_view")
+    st.session_state["_duck_loaded_hash"] = _hash
+
+
+def query_duckdb(
+    rows: list[dict],
+    date_col: str = None,
+    date_from=None,
+    date_to=None,
+    search: str = None,
+) -> "pd.DataFrame":
+    """
+    Filter & return DataFrame via DuckDB SQL.
+    Jika DuckDB tidak tersedia, fallback ke pandas biasa.
+    """
+    import pandas as pd
+
+    _ensure_duckdb(rows)
+    conn = _get_duckdb_conn()
+
+    if not _DUCK_OK or conn is None:
+        # Fallback pandas
+        df = pd.DataFrame(rows)
+        if "Total (Rp)" in df.columns:
+            df["Total (Rp)"] = pd.to_numeric(df["Total (Rp)"], errors="coerce").fillna(0).astype(int)
+        return df
+
+    conditions = ["1=1"]
+    params = []
+
+    if date_col and date_from and date_to:
+        safe_col = date_col.replace('"', '')
+        conditions.append(f'TRY_CAST("{safe_col}" AS DATE) BETWEEN ? AND ?')
+        params.extend([str(date_from), str(date_to)])
+
+    if search and search.strip():
+        s = f"%{search.strip()}%"
+        conditions.append(
+            '("Hotel" ILIKE ? OR "Guest Name" ILIKE ? OR "Booking ID" ILIKE ?)'
+        )
+        params.extend([s, s, s])
+
+    where = " AND ".join(conditions)
+    try:
+        df = conn.execute(
+            f'SELECT * FROM hotel WHERE {where}', params
+        ).df()
+    except Exception:
+        df = pd.DataFrame(rows)
+    return df
+
+
+def agg_duckdb(metric_col: str, group_col: str) -> "pd.DataFrame":
+    """Agregasi cepat via DuckDB."""
+    import pandas as pd
+
+    conn = _get_duckdb_conn()
+    if not _DUCK_OK or conn is None:
+        return pd.DataFrame()
+    safe_m = metric_col.replace('"', '')
+    safe_g = group_col.replace('"', '')
+    try:
+        return conn.execute(f"""
+            SELECT "{safe_g}", SUM("{safe_m}") AS total, COUNT(*) AS cnt
+            FROM hotel
+            WHERE "{safe_g}" IS NOT NULL
+              AND CAST("{safe_g}" AS VARCHAR) NOT IN ('', 'nan', 'None', 'NaN')
+            GROUP BY "{safe_g}"
+            ORDER BY total DESC
+        """).df()
+    except Exception:
+        return pd.DataFrame()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DUPLICATE CHECK
+# ═══════════════════════════════════════════════════════════════════════════════
+def _ns(v):
+    return str(v or "").strip().lower()
+
+
+def _ni(v):
+    try:
+        return int(float(str(v).replace(",", "").replace(".", "") or 0))
+    except:
+        return 0
+
+
+def check_duplicate(new, rows):
+    bid = _ns(new.get("booking_id"))
+    for r in rows:
+        if bid and bid == _ns(r.get("Booking ID")):
+            return True, "Booking ID sudah terdaftar", r
+        sc = sum([
+            _ns(new.get("hotel")) == _ns(r.get("Hotel")),
+            _ns(new.get("checkin")) == _ns(r.get("Check-in")),
+            _ns(new.get("name")) == _ns(r.get("Guest Name")),
+            _ni(new.get("room")) == _ni(r.get("Total (Rp)")),
+        ])
+        if sc >= 3:
+            return True, "Kemungkinan duplikat (kesamaan tinggi)", r
+    return False, "", None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PDF HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+def pdf_images(data):
+    if not _PDF_OK:
+        raise RuntimeError("pypdfium2 not installed")
+    doc = _pdfium.PdfDocument(data)
+    return [doc[i].render(scale=2.0).to_pil() for i in range(len(doc))]
+
+
+def pdf_text(data):
+    if not _PDF_OK or not data:
+        return ""
+    try:
+        doc, parts = _pdfium.PdfDocument(data), []
+        for i in range(len(doc)):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                parts.append(doc[i].get_textpage().get_text_bounded())
+        return "\n".join(parts).strip()
+    except:
+        return ""
+
+
+def to_b64(img):
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=92)
+    return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AI PROMPTS & PARSERS
+# ═══════════════════════════════════════════════════════════════════════════════
+_SYS = """You are a corporate hotel expense AI parser for credit card reporting.
+Parse any document: Expedia TAAP receipt, Mitra Tours itinerary, hotel invoice.
+Return ONLY a valid JSON object — no markdown, no explanation.
+Keys: supplier, booking_id, booked_on (YYYY-MM-DD), issued_on (YYYY-MM-DD),
+hotel, checkin (YYYY-MM-DD), checkout (YYYY-MM-DD), qty (e.g. "1 room x 2 nights"),
+room (integer total IDR, strip Rp/commas), name (primary guest),
+card (e.g. "Visa •••• 0191"), notes (room type, tax, etc.)
+Rules: 1.Dates->YYYY-MM-DD. 2.Amounts->plain integer. 3.Missing->"" or 0."""
+
+_SYS_NONEXP = """You are a payment receipt parser. Extract ONLY these 4 fields.
+Return ONLY a valid JSON object — no markdown, no explanation.
+Keys:
+- timestamp_input : string — Date/Time exactly as shown (e.g. "15/05/2026 16:18:34")
+- booking_id      : string — Invoice Number / Reference Number / Transaction ID
+- room            : integer — Amount charged, strip IDR/Rp/,/. -> plain integer only
+- card            : string — Card Number as shown (e.g. "521558******4467")
+Missing -> "" for strings, 0 for integers."""
+
+
+def _call_openai(content, sys_prompt, max_tokens=800):
+    import openai, httpx
+
+    key = get_openai_key()
+    if not key:
+        raise ValueError("OpenAI API key belum diisi.")
+    resp = openai.OpenAI(api_key=key, http_client=httpx.Client()).chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": content}],
+        temperature=0.0,
+        max_tokens=max_tokens,
+    )
+    raw = resp.choices[0].message.content
+    m = re.search(r"\{[\s\S]*\}", raw)
+    if not m:
+        raise ValueError("Format AI tidak valid.")
+    return json.loads(m.group()), raw
+
+
+def _call_claude(content, sys_prompt, max_tokens=800):
+    import anthropic
+
+    key = get_claude_key()
+    if not key:
+        raise ValueError("Anthropic API key belum diisi.")
+    resp = anthropic.Anthropic(api_key=key).messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=max_tokens,
+        system=sys_prompt,
+        messages=[{"role": "user", "content": content}],
+    )
+    raw = resp.content[0].text
+    m = re.search(r"\{[\s\S]*\}", raw)
+    if not m:
+        raise ValueError("Format AI tidak valid.")
+    return json.loads(m.group()), raw
+
+
+def _build_expedia(text, images):
+    if get_ai_provider() == "claude":
+        c = []
+        if images:
+            for b64, mime in images:
+                c.append({"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}})
+        c.append({"type": "text", "text": text or "Extract all structured data."})
+        return c
+    else:
+        c = []
+        if images:
+            for b64, mime in images:
+                c.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"}})
+        c.append({"type": "text", "text": text or "Extract all structured data."})
+        return c
+
+
+def _build_receipt(images):
+    if get_ai_provider() == "claude":
+        c = []
+        for b64, mime in images:
+            c.append({"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}})
+        c.append({"type": "text", "text": "Extract the 4 fields from this payment receipt."})
+        return c
+    else:
+        c = []
+        for b64, mime in images:
+            c.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"}})
+        c.append({"type": "text", "text": "Extract the 4 fields from this payment receipt."})
+        return c
+
+
+def ai_parse(text="", images=None):
+    c = _build_expedia(text, images)
+    if get_ai_provider() == "claude":
+        return _call_claude(c, _SYS)
+    return _call_openai(c, _SYS)
+
+
+def ai_parse_receipt(images):
+    c = _build_receipt(images)
+    if get_ai_provider() == "claude":
+        return _call_claude(c, _SYS_NONEXP, max_tokens=400)
+    return _call_openai(c, _SYS_NONEXP, max_tokens=400)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  UI UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════════
+def fmt(v):
+    try:
+        return "Rp {:,}".format(int(float(v or 0))).replace(",", ".")
+    except:
+        return str(v) if v else "—"
+
+
+def now_ts():
+    return datetime.now().strftime("%d/%m/%Y %H:%M")
+
+
+def notice(kind, msg):
+    icons = {"ok": "✓", "err": "✕", "info": "ℹ", "warn": "⚠", "violet": "✦"}
+    cls = {"ok": "nok", "err": "nerr", "info": "ninfo", "warn": "nwarn", "violet": "nviolet"}
+    st.markdown(
+        f'<div class="notice {cls.get(kind,"ninfo")}"><b>{icons.get(kind,"ℹ")}</b>&ensp;{msg}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ── Card normalizer ───────────────────────────────────────────────────────────
+_BIN_MAP = {"521558": ("MasterCard", "4467"), "489594": ("Visa", "0191")}
+_DISPLAY_MAP = {
+    "mastercard \u2022\u2022\u2022\u2022 4467": "MasterCard \u2022\u2022\u2022\u2022 4467",
+    "visa \u2022\u2022\u2022\u2022 0191": "Visa \u2022\u2022\u2022\u2022 0191",
+}
+
+
+def normalize_card(raw: str) -> str:
+    if not raw:
+        return ""
+    v = str(raw).strip()
+    _lower = re.sub(r"\s+", " ", v.lower())
+    if _lower in _DISPLAY_MAP:
+        return _DISPLAY_MAP[_lower]
+    digits = re.sub(r"[^\d]", "", v)
+    if len(digits) >= 6:
+        bin6 = digits[:6]
+        if bin6 in _BIN_MAP:
+            brand, last4 = _BIN_MAP[bin6]
+            return f"{brand} \u2022\u2022\u2022\u2022 {last4}"
+    return v
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SESSION STATE DEFAULTS
+# ═══════════════════════════════════════════════════════════════════════════════
+_DEF = {
+    "tab": "input", "input_mode": "expedia", "bulk_results": [], "bulk_saved_count": 0,
+    "openai_key_manual": "", "claude_key_manual": "", "ai_provider": "claude",
+    "sheet_id": "", "gas_url": "",
+    "last_issuer": "", "last_pic": "", "last_no_bc": "", "last_nama_kegiatan": "",
+    "_ne_last_file_key": "", "_ne_prefill_ts": "", "_ne_prefill_bid": "",
+    "_ne_prefill_room": "", "_ne_prefill_card": "", "_ne_parse_ok": False, "_ne_parse_err": "",
+}
+for _k, _v in _DEF.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HEADER
+# ═══════════════════════════════════════════════════════════════════════════════
+_prov = get_ai_provider()
+_prov_lbl = "GPT-4o mini" if _prov == "openai" else "Claude Sonnet"
+_prov_cls = "ah-ai-openai" if _prov == "openai" else "ah-ai-claude"
+
+st.markdown(
+    f"""
+<div class="app-header">
+  <div class="ah-icon" style="font-size:22px;font-weight:800;color:#191d3a;">M</div>
+  <div>
+    <div class="ah-title">CC Reporting</div>
+    <div class="ah-sub">Mitra Tours &amp; Travel · v7 Fast</div>
+  </div>
+  <span class="ah-ai-badge {_prov_cls}">{'🤖' if _prov=='openai' else '🟣'} {_prov_lbl}</span>
+  <div class="ah-live">LIVE</div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# ── Bottom nav ────────────────────────────────────────────────────────────────
+_cur = st.session_state["tab"]
+_tab_icons = {"input": "📥", "dashboard": "📊", "log": "🕐", "settings": "⚙️"}
+_tab_labels = {"input": "Input", "dashboard": "Dashboard", "log": "Activity", "settings": "Settings"}
+_tab_keys = ["input", "dashboard", "log", "settings"]
+
+st.markdown('<div class="nb-wrap">', unsafe_allow_html=True)
+_ncols = st.columns(4)
+for i, _tk in enumerate(_tab_keys):
+    with _ncols[i]:
+        if st.button(
+            f"{_tab_icons[_tk]}\n{_tab_labels[_tk]}",
+            key=f"nb_{_tk}",
+            use_container_width=True,
+            type="primary" if _cur == _tk else "secondary",
+        ):
+            st.session_state["tab"] = _tk
+            st.rerun()
+st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TAB — INPUT
+# ═══════════════════════════════════════════════════════════════════════════════
+if st.session_state["tab"] == "input":
+
+    if not active_ai_ready():
+        _nm = "OpenAI" if get_ai_provider() == "openai" else "Anthropic"
+        notice("err", f"{_nm} API key belum diisi — buka <b>Settings</b>.")
+        st.stop()
+    if not _PDF_OK:
+        notice("warn", "pypdfium2 belum terinstall — PDF nonaktif.")
+
+    _cur_mode = st.session_state["input_mode"]
+    st.markdown('<div class="mode-toggle">', unsafe_allow_html=True)
+    _ma, _mb = st.columns(2)
+    with _ma:
+        if st.button(
+            "✈  Expedia / TAAP", key="mode_expedia", use_container_width=True,
+            type="primary" if _cur_mode == "expedia" else "secondary",
+        ):
+            st.session_state["input_mode"] = "expedia"
+            st.session_state["bulk_results"] = []
+            st.rerun()
+    with _mb:
+        if st.button(
+            "🧾  Non-Expedia", key="mode_nonexp", use_container_width=True,
+            type="primary" if _cur_mode == "nonexpedia" else "secondary",
+        ):
+            st.session_state["input_mode"] = "nonexpedia"
+            st.session_state["bulk_results"] = []
+            for _k in ["_ne_last_file_key", "_ne_prefill_ts", "_ne_prefill_bid",
+                       "_ne_prefill_room", "_ne_prefill_card", "_ne_parse_ok", "_ne_parse_err"]:
+                st.session_state[_k] = _DEF.get(_k, "")
+            st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="sec-lbl">Issuer &amp; PIC</div>', unsafe_allow_html=True)
+    _ISSUERS = [
+        "", "Ade Puspitasari", "Farras Mahmud", "Meijika",
+        "Muhammad Geraldi Jagaddhita", "Nur Anissa Firda Aulia", "Riega Wisudhantara",
+        "Rifyal Tumber", "Selvy Anggraini", "Shaiful Baldy", "Veronica Novi Heri",
+        "Rida Manora Nasution",
+    ]
+    _li = st.session_state.get("last_issuer", "")
+    _bi = _ISSUERS.index(_li) if _li in _ISSUERS else 0
+    _ca, _cb = st.columns(2)
+    bulk_issuer = _ca.selectbox(
+        "Issuer *", options=_ISSUERS, index=_bi,
+        format_func=lambda x: "— Pilih —" if x == "" else x, key="bulk_issuer",
+    )
+    bulk_pic = _cb.text_input(
+        "PIC *", value=st.session_state.get("last_pic", ""),
+        placeholder="Nama PIC", key="bulk_pic",
+    )
+    _cc, _cd = st.columns(2)
+    bulk_no_bc = _cc.text_input(
+        "No. BC", value=st.session_state.get("last_no_bc", ""),
+        placeholder="Nomor BC", key="bulk_no_bc",
+    )
+    bulk_nama_kegiatan = _cd.text_input(
+        "Nama Kegiatan", value=st.session_state.get("last_nama_kegiatan", ""),
+        placeholder="Kegiatan", key="bulk_nama_kegiatan",
+    )
+
+    _ap = get_ai_provider()
+    if _ap == "claude":
+        notice("violet", "AI: <b>Claude</b> (Anthropic) &nbsp;·&nbsp; Ganti di Settings")
+    else:
+        notice("info", "AI: <b>OpenAI</b> &nbsp;·&nbsp; Ganti di Settings")
+
+    # ── MODE A: EXPEDIA ───────────────────────────────────────────────────────
+    if _cur_mode == "expedia":
+        st.markdown(
+            """
+<div class="expedia-banner">
+  <div style="font-size:15px;font-weight:800;color:#003580;letter-spacing:-.5px;">expedia</div>
+  <span class="taap-pill">TAAP + Mitra Tours</span>
+</div>""",
+            unsafe_allow_html=True,
+        )
+        _ftypes = ["jpg", "jpeg", "png", "webp"] + (["pdf"] if _PDF_OK else [])
+        bulk_files = st.file_uploader(
+            label="", type=_ftypes, accept_multiple_files=True,
+            label_visibility="collapsed", key="bulk_uf",
+        )
+        _n = len(bulk_files) if bulk_files else 0
+        if _n:
+            notice("info", f"<b>{_n} file</b> dipilih dan siap diproses.")
+        skip_dup = st.checkbox("Lewati duplikat", value=True, key="bulk_skip_dup")
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        st.markdown('<div class="bb-wrap">', unsafe_allow_html=True)
+        _run = st.button(
+            "Submit", type="primary", use_container_width=True,
+            disabled=(not _n or not bulk_issuer or not bulk_pic.strip()),
+            key="bulk_run",
+        )
+        _clear = st.button("Delete", type="secondary", use_container_width=True, key="bulk_clear")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if _clear:
+            st.session_state["bulk_results"] = []
+            st.session_state["bulk_saved_count"] = 0
+            st.rerun()
+
+        if _run:
+            st.session_state.update(
+                last_issuer=bulk_issuer, last_pic=bulk_pic,
+                last_no_bc=bulk_no_bc, last_nama_kegiatan=bulk_nama_kegiatan,
+                bulk_results=[], bulk_saved_count=0,
             )
+            try:
+                _existing = load_rows()
+            except:
+                _existing = []
+            _all_res, _saved_run = [], 0
+            _slot = st.empty()
+            for _idx, _uf in enumerate(bulk_files):
+                _pct = int(_idx / _n * 100)
+                _slot.markdown(
+                    '<div class="bulk-prog"><div class="bulk-prog-f" style="width:'
+                    + str(_pct) + '%"></div></div>'
+                    + '<div class="bulk-prog-lbl">' + str(_idx + 1) + "/" + str(_n)
+                    + " · " + _uf.name + "</div>",
+                    unsafe_allow_html=True,
+                )
+                _res = {"file": _uf.name, "status": "error", "parsed": {}, "err": "", "mode": "expedia"}
+                try:
+                    _raw = _uf.read()
+                    _imgs, _txt = [], ""
+                    if _uf.name.lower().endswith(".pdf"):
+                        if not _PDF_OK:
+                            raise RuntimeError("pypdfium2 tidak terinstall")
+                        _pages = pdf_images(_raw)
+                        _imgs = [to_b64(pg) for pg in _pages]
+                        _txt = pdf_text(_raw)
+                    else:
+                        _io = Image.open(io.BytesIO(_raw)).convert("RGB")
+                        _b, _m = to_b64(_io)
+                        _imgs = [(_b, _m)]
+                    _comb = ("EXTRACTED PDF TEXT (authoritative):\n" + _txt) if _txt else ""
+                    _parsed, _ = ai_parse(_comb, _imgs or None)
+                    _parsed["timestamp_input"] = now_ts()
+                    _is_dup, _why, _ = check_duplicate(
+                        {"booking_id": _parsed.get("booking_id"),
+                         "hotel": _parsed.get("hotel"), "checkin": _parsed.get("checkin"),
+                         "name": _parsed.get("name"), "room": _parsed.get("room")},
+                        _existing,
+                    )
+                    if _is_dup and skip_dup:
+                        _res.update(status="skipped", parsed=_parsed, err=_why)
+                    else:
+                        save_row({
+                            "timestamp_input": _parsed.get("timestamp_input", ""),
+                            "supplier": _parsed.get("supplier", ""),
+                            "booking_id": _parsed.get("booking_id", ""),
+                            "booked_on": _parsed.get("booked_on", ""),
+                            "issued_on": _parsed.get("issued_on", ""),
+                            "hotel": _parsed.get("hotel", ""),
+                            "checkin": _parsed.get("checkin", ""),
+                            "qty": _parsed.get("qty", ""),
+                            "room": _parsed.get("room", 0),
+                            "checkout": _parsed.get("checkout", ""),
+                            "name": _parsed.get("name", ""),
+                            "card": normalize_card(_parsed.get("card", "")),
+                            "issuer": bulk_issuer, "pic": bulk_pic,
+                            "no_bc": bulk_no_bc.strip(),
+                            "nama_kegiatan": bulk_nama_kegiatan.strip(),
+                            "notes": _parsed.get("notes", ""),
+                        })
+                        _res.update(status="success", parsed=_parsed)
+                        _saved_run += 1
+                        _existing.append({
+                            "Booking ID": _parsed.get("booking_id", ""),
+                            "Hotel": _parsed.get("hotel", ""),
+                            "Check-in": _parsed.get("checkin", ""),
+                            "Guest Name": _parsed.get("name", ""),
+                            "Total (Rp)": _parsed.get("room", 0),
+                        })
+                except Exception as _exc:
+                    _res.update(err=str(_exc)[:140])
+                _all_res.append(_res)
+            _slot.empty()
+            st.session_state["bulk_results"] = _all_res
+            st.session_state["bulk_saved_count"] = _saved_run
+            st.rerun()
 
-        def _cell(label, val, hint, badge=""):
-            return (
-                f'<div style="padding:14px 18px 12px;border-right:1px solid #E2E8F0;transition:background .12s;" '
-                f'onmouseover="this.style.background=\'#F8FDFC\'" onmouseout="this.style.background=\'\'">'
-                f'<span style="font-size:.53rem;font-weight:700;letter-spacing:.9px;text-transform:uppercase;'
-                f'color:#94A3B8;display:block;margin-bottom:5px;">{label}</span>'
-                f'<span style="font-family:\'Sora\',sans-serif;font-size:1.3rem;font-weight:800;color:#0F172A;'
-                f'display:block;margin-bottom:3px;">{val}</span>'
-                f'<span style="font-size:.54rem;color:#94A3B8;display:block;margin-bottom:4px;">{hint}</span>'
-                f'{badge}</div>'
+    # ── MODE B: NON-EXPEDIA ───────────────────────────────────────────────────
+    else:
+        st.markdown(
+            """
+<div style="background:#fff;border:1.5px solid #ddd;border-bottom:none;
+    border-radius:16px 16px 0 0;padding:11px 14px;
+    display:flex;align-items:center;justify-content:space-between;margin-top:14px">
+  <div style="display:flex;align-items:center;gap:8px">
+    <span style="font-size:18px">🧾</span>
+    <div>
+      <div style="font-size:13px;font-weight:700;color:#191d3a">Non-Expedia — Payment Receipt</div>
+      <div style="font-size:10px;color:#9e9e9e">AI baca 4 field · sisanya isian manual</div>
+    </div>
+  </div>
+  <span style="font-size:9px;font-weight:700;color:#7a5c00;background:#fef9c3;
+    border:1px solid #fcd34d;padding:3px 9px;border-radius:20px">Manual + AI</span>
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+        ne_files = st.file_uploader(
+            label="", type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=False, label_visibility="collapsed", key="ne_uf",
+        )
+
+        if ne_files:
+            _cur_file_key = ne_files.name + str(ne_files.size)
+            if _cur_file_key != st.session_state.get("_ne_last_file_key", ""):
+                with st.spinner("🤖 AI membaca receipt…"):
+                    try:
+                        _raw_pre = ne_files.read()
+                        _io_pre = Image.open(io.BytesIO(_raw_pre)).convert("RGB")
+                        _b_pre, _m_pre = to_b64(_io_pre)
+                        _pre_fields, _ = ai_parse_receipt([(_b_pre, _m_pre)])
+                        st.session_state["_ne_prefill_ts"] = str(_pre_fields.get("timestamp_input", "")).strip()
+                        st.session_state["_ne_prefill_bid"] = str(_pre_fields.get("booking_id", "")).strip()
+                        st.session_state["_ne_prefill_card"] = normalize_card(
+                            str(_pre_fields.get("card", "")).strip()
+                        )
+                        try:
+                            _r = int(float(str(_pre_fields.get("room", 0)).replace(",", "").replace(".", "") or 0))
+                        except:
+                            _r = 0
+                        st.session_state["_ne_prefill_room"] = str(_r) if _r else ""
+                        st.session_state["_ne_last_file_key"] = _cur_file_key
+                        st.session_state["_ne_parse_ok"] = True
+                        st.session_state["_ne_parse_err"] = ""
+                    except Exception as _pre_exc:
+                        st.session_state["_ne_parse_ok"] = False
+                        st.session_state["_ne_parse_err"] = str(_pre_exc)[:160]
+                        st.session_state["_ne_last_file_key"] = _cur_file_key
+                st.rerun()
+
+            if st.session_state.get("_ne_parse_ok"):
+                notice("ok", "✓ AI berhasil membaca receipt · <b>Timestamp · Invoice · Amount · Card</b> terisi otomatis")
+            elif st.session_state.get("_ne_parse_err"):
+                notice("warn", "AI gagal membaca · isi manual.")
+        else:
+            if st.session_state.get("_ne_last_file_key", ""):
+                for _k in ["_ne_last_file_key", "_ne_prefill_ts", "_ne_prefill_bid",
+                           "_ne_prefill_room", "_ne_prefill_card", "_ne_parse_ok", "_ne_parse_err"]:
+                    st.session_state[_k] = _DEF.get(_k, "")
+
+        st.markdown(
+            """
+<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:12px;
+    padding:9px 12px;font-size:11px;color:#166534;margin:8px 0 4px;line-height:1.8">
+  <b>✓ Otomatis dari AI:</b>
+  📅 Timestamp &nbsp;·&nbsp; 💰 Total (Rp) &nbsp;·&nbsp; 💳 Kartu Kredit &nbsp;·&nbsp; 📄 Booking ID
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown('<div class="sec-lbl">Data Booking — Isian Manual</div>', unsafe_allow_html=True)
+        _SUPPLIERS = ["Direct To Hotel", "Direct To Supplier"]
+        _n1, _n2 = st.columns(2)
+        ne_supplier = _n1.selectbox("Supplier *", options=_SUPPLIERS, index=0, key="ne_supplier")
+        ne_hotel = _n2.text_input("Hotel *", placeholder="Nama hotel", key="ne_hotel")
+        _n3, _n4 = st.columns(2)
+        ne_name = _n3.text_input("Guest Name *", placeholder="Nama tamu", key="ne_name")
+        ne_booking_id = _n4.text_input(
+            "Booking ID",
+            value=st.session_state.get("_ne_prefill_bid", ""),
+            placeholder="Dari receipt / manual",
+            key="ne_booking_id",
+        )
+
+        def _fmt_date(d):
+            try:
+                return d.strftime("%Y-%m-%d") if d else ""
+            except:
+                return ""
+
+        _n5, _n6 = st.columns(2)
+        ne_checkin_d = _n5.date_input("Check-in", value=None, format="DD/MM/YYYY", key="ne_checkin")
+        ne_checkout_d = _n6.date_input("Check-out", value=None, format="DD/MM/YYYY", key="ne_checkout")
+        ne_checkin = _fmt_date(ne_checkin_d)
+        ne_checkout = _fmt_date(ne_checkout_d)
+        _n7, _n8 = st.columns(2)
+        ne_qty = _n7.text_input("Room × Night", placeholder="1 room x 2 nights", key="ne_qty")
+        ne_booked_on_d = _n8.date_input("Booking Date", value=None, format="DD/MM/YYYY", key="ne_booked_on")
+        ne_booked_on = _fmt_date(ne_booked_on_d)
+        _n9, _n10 = st.columns(2)
+        ne_issued_on_d = _n9.date_input("Issued Date", value=None, format="DD/MM/YYYY", key="ne_issued_on")
+        ne_issued_on = _fmt_date(ne_issued_on_d)
+        ne_extra_notes = _n10.text_input("Catatan", placeholder="Opsional", key="ne_extra_notes")
+
+        _ne_ready = (
+            bool(ne_files) and bool(bulk_issuer) and bool(bulk_pic.strip())
+            and bool(ne_supplier) and bool(ne_hotel.strip()) and bool(ne_name.strip())
+        )
+
+        st.markdown('<div class="bb-wrap">', unsafe_allow_html=True)
+        _ne_run = st.button(
+            "Submit", type="primary", use_container_width=True,
+            disabled=not _ne_ready, key="ne_run",
+        )
+        _ne_clear = st.button("Delete", type="secondary", use_container_width=True, key="ne_clear")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if not _ne_ready:
+            _missing = []
+            if not ne_files:         _missing.append("upload receipt")
+            if not bulk_issuer:      _missing.append("Issuer")
+            if not bulk_pic.strip(): _missing.append("PIC")
+            if not ne_hotel.strip(): _missing.append("Hotel")
+            if not ne_name.strip():  _missing.append("Guest Name")
+            if _missing:
+                st.markdown(
+                    '<div style="font-size:11px;color:#9e9e9e;text-align:center;margin-top:4px">Lengkapi: '
+                    + " · ".join(_missing) + "</div>",
+                    unsafe_allow_html=True,
+                )
+
+        if _ne_clear:
+            st.session_state["bulk_results"] = []
+            st.session_state["bulk_saved_count"] = 0
+            for _k in ["_ne_last_file_key", "_ne_prefill_ts", "_ne_prefill_bid",
+                       "_ne_prefill_room", "_ne_prefill_card", "_ne_parse_ok", "_ne_parse_err"]:
+                st.session_state[_k] = _DEF.get(_k, "")
+            st.rerun()
+
+        if _ne_run and _ne_ready:
+            st.session_state.update(
+                last_issuer=bulk_issuer, last_pic=bulk_pic,
+                last_no_bc=bulk_no_bc, last_nama_kegiatan=bulk_nama_kegiatan,
+                bulk_results=[], bulk_saved_count=0,
             )
-
-        # Prev period bar
-        if prev:
-            _pd = f"&nbsp;·&nbsp;{prev.get('prev_min','')} – {prev.get('prev_max','')}"
-            st.markdown(
-                f'<div style="padding:8px 14px;background:#fff;border:1px solid #E2E8F0;border-radius:10px;'
-                f'margin-bottom:20px;display:flex;align-items:center;gap:8px;">'
-                f'<span style="width:7px;height:7px;border-radius:50%;background:#0D9488;display:inline-block;"></span>'
-                f'<span style="font-size:.58rem;color:#0F766E;font-weight:600;">'
-                f'✓ Perbandingan aktif{_pd}&nbsp;·&nbsp;{prev.get("rows",0):,} baris</span></div>',
-                unsafe_allow_html=True)
-        else:
-            st.markdown(
-                '<div style="padding:8px 14px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;margin-bottom:20px;">'
-                '<span style="font-size:.58rem;color:#94A3B8;font-weight:600;">'
-                'ⓘ Atur filter periode untuk mengaktifkan perbandingan vs periode sebelumnya</span></div>',
-                unsafe_allow_html=True)
-
-        # Hero cards row
-        _pm_html = (f'<span style="font-family:\'Sora\',sans-serif;">{_pmv:.1f}%</span>'
-                    if _pmv is not None else "N/A")
-        st.markdown(
-            '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px;">'
-            + _hero("📄","Invoice Unik",_ctr(_ui),"Total transaksi invoice unik",_badge(_ui,prev.get("ui")))
-            + _hero("💰","Sales AR",_ctr(_sa),"Total nilai penjualan (IDR)",_badge(_sa,prev.get("sa")),"linear-gradient(90deg,#134E4A,#0D9488)")
-            + _hero("📈","Avg Profit Margin",_pm_html,"Rata-rata margin keuntungan",_badge(_pmv,prev.get("pm")),"linear-gradient(90deg,#0D9488,#2DD4BF)")
-            + '</div>',
-            unsafe_allow_html=True)
-
-        # Volume grid
-        _ag_html = f"{_aging:.1f} hari" if _aging else "N/A"
-        st.markdown(
-            '<div style="display:grid;grid-template-columns:repeat(4,1fr);background:#fff;'
-            'border:1px solid #E2E8F0;border-radius:12px;overflow:hidden;'
-            'box-shadow:0 1px 3px rgba(0,0,0,.05);margin-bottom:14px;">'
-            '<div style="grid-column:1/-1;padding:8px 16px 6px;font-size:.53rem;font-weight:700;'
-            'letter-spacing:1.1px;text-transform:uppercase;color:#94A3B8;'
-            'border-bottom:1px solid #E2E8F0;background:#FAFBFC;">Volume &amp; Trafik</div>'
-            + _cell("Room Night",f"{_rn:,}","Total malam kamar",_badge(_rn,prev.get("rn"),size="sm"))
-            + _cell("Pax Unik",f"{_up:,}","Nama tamu unik",_badge(_up,prev.get("up"),size="sm"))
-            + _cell("Avg Aging Invoice",_ag_html,"Check In − Inv Date")
-            + _cell("Total Baris",f"{_tr:,}","Baris data aktif")
-            + '</div>',
-            unsafe_allow_html=True)
-
-        # Master data grid
-        st.markdown(
-            '<div style="display:grid;grid-template-columns:repeat(5,1fr);background:#fff;'
-            'border:1px solid #E2E8F0;border-radius:12px;overflow:hidden;'
-            'box-shadow:0 1px 3px rgba(0,0,0,.05);margin-bottom:20px;">'
-            '<div style="grid-column:1/-1;padding:8px 16px 6px;font-size:.53rem;font-weight:700;'
-            'letter-spacing:1.1px;text-transform:uppercase;color:#94A3B8;'
-            'border-bottom:1px solid #E2E8F0;background:#FAFBFC;">Master Data</div>'
-            + _cell("Total Supplier",f"{_tsup:,}","Supplier unik")
-            + _cell("Total Hotel",f"{_thot:,}","Hotel unik")
-            + _cell("Total City",f"{_tcit:,}","Kota hotel unik")
-            + _cell("Total Agent",f"{_tpic:,}","Agent unik")
-            + _cell("Kolom Aktif",f"{_tc:,}","Field tersedia")
-            + '</div>',
-            unsafe_allow_html=True)
-
-        # ── Tren bulanan ───────────────────────────────────────────────────────
-        if "Issued Date" in df_view.columns and "Invoice No" in df_view.columns:
-            _dt = df_view.dropna(subset=["Issued Date","Invoice No"]).copy()
-            _dt["_ml"] = _dt["Issued Date"].dt.strftime("%b %Y")
-            _dt["_mn"] = _dt["Issued Date"].dt.to_period("M").apply(lambda p: p.ordinal)
-            _ti2 = (_dt.groupby(["_ml","_mn"],as_index=False)["Invoice No"]
-                       .nunique().rename(columns={"Invoice No":"Inv"}).sort_values("_mn"))
-            has_rn = "Total Room Night" in df_view.columns
-            if has_rn:
-                _tr2s = _dt.groupby(["_ml","_mn"],as_index=False)["Total Room Night"].sum().sort_values("_mn")
-
-            def _mini(items):
-                parts = []
-                for lbl, val in items:
-                    parts.append(
-                        f'<div><span style="font-size:.5rem;font-weight:700;text-transform:uppercase;'
-                        f'letter-spacing:.8px;color:#94A3B8;">{lbl}</span><br>'
-                        f'<span style="font-family:\'Sora\',sans-serif;font-size:.88rem;'
-                        f'font-weight:800;color:#0F172A;">{val}</span></div>')
-                return ('<div style="display:flex;gap:16px;margin-bottom:12px;'
-                        'padding-bottom:12px;border-bottom:1px solid #F1F5F9;">'
-                        + "".join(parts) + '</div>')
-
-            def _linec(df_l, x, y, color="#0D9488", fill="rgba(13,148,136,.08)", h=280):
-                _mx = df_l[y].max(); _th = max(1, _mx*.05)
-                _lbl = df_l[y].apply(lambda v: f"{int(v):,}" if v >= _th else "")
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=df_l[x], y=df_l[y], mode="lines+markers+text",
-                    text=_lbl, textposition="top center",
-                    textfont=dict(size=10,color=color),
-                    line=dict(color=color,width=2.5,shape="spline"),
-                    marker=dict(size=8,color=color),
-                    fill="tozeroy", fillcolor=fill,
-                    hovertemplate=f"<b>%{{x}}</b><br>{y}: <b>%{{y:,.0f}}</b><extra></extra>",
-                    cliponaxis=False))
-                if not df_l.empty:
-                    pk = df_l.loc[df_l[y].idxmax()]
-                    fig.add_annotation(
-                        x=pk[x], y=pk[y],
-                        text=f"▲ Peak: {int(pk[y]):,}",
-                        showarrow=True,arrowhead=2,arrowcolor=color,ax=0,ay=-32,
-                        font=dict(size=10,color=color),
-                        bgcolor="rgba(240,253,250,.9)",bordercolor=color,borderpad=4)
-                fig.update_layout(hovermode="x unified",height=h,
-                                  xaxis=dict(tickangle=-30),showlegend=False,
-                                  margin=dict(l=8,r=8,t=12,b=8))
-                return fig
-
-            gsec("📈 Tren Bulanan")
-            c1, c2 = st.columns(2)
-            with c1:
-                pk = _ti2.loc[_ti2["Inv"].idxmax()]
-                st.markdown(
-                    '<div style="background:#fff;border:1px solid #E2E8F0;border-radius:12px;padding:16px 18px 4px;">'
-                    '<div style="font-size:.72rem;font-weight:700;color:#0F172A;margin-bottom:3px;">📄 Tren Invoice Bulanan</div>'
-                    + _mini([("Total",compact_num(int(_ti2["Inv"].sum()))),
-                              ("Peak",f'{pk["_ml"]} · {compact_num(int(pk["Inv"]))}'),
-                              ("Avg/bln",compact_num(int(_ti2["Inv"].mean())))])
-                    + '</div>', unsafe_allow_html=True)
-                st.plotly_chart(theme(_linec(_ti2,"_ml","Inv")), use_container_width=True)
-            with c2:
-                if has_rn:
-                    pk2 = _tr2s.loc[_tr2s["Total Room Night"].idxmax()]
-                    st.markdown(
-                        '<div style="background:#fff;border:1px solid #E2E8F0;border-radius:12px;padding:16px 18px 4px;">'
-                        '<div style="font-size:.72rem;font-weight:700;color:#0F172A;margin-bottom:3px;">🌙 Tren Room Night Bulanan</div>'
-                        + _mini([("Total",compact_num(int(_tr2s["Total Room Night"].sum()))),
-                                  ("Peak",f'{pk2["_ml"]} · {compact_num(int(pk2["Total Room Night"]))}'),
-                                  ("Avg/bln",compact_num(int(_tr2s["Total Room Night"].mean())))])
-                        + '</div>', unsafe_allow_html=True)
-                    st.plotly_chart(theme(_linec(_tr2s,"_ml","Total Room Night")), use_container_width=True)
-                else:
-                    st.info("Kolom Total Room Night tidak tersedia.")
-
-            c3, c4 = st.columns(2)
-            with c3:
-                if "Profit" in df_view.columns:
-                    _dt3 = _dt.copy()
-                    _dt3["Profit"] = pd.to_numeric(_dt3.get("Profit", pd.Series(dtype=float)), errors="coerce").fillna(0)
-                    _pr_s = _dt3.groupby(["_ml","_mn"],as_index=False)["Profit"].sum().sort_values("_mn")
-                    st.markdown(
-                        '<div style="background:#fff;border:1px solid #E2E8F0;border-radius:12px;padding:16px 18px 4px;">'
-                        '<div style="font-size:.72rem;font-weight:700;color:#0F172A;margin-bottom:3px;">💹 Tren Profit Bulanan</div>'
-                        + _mini([("Total",compact_num(_pr_s["Profit"].sum())),
-                                  ("Margin avg",f"{_pmv:.1f}%" if _pmv else "—")])
-                        + '</div>', unsafe_allow_html=True)
-                    st.plotly_chart(theme(_linec(_pr_s,"_ml","Profit",color="#134E4A",fill="rgba(19,78,74,.07)")), use_container_width=True)
-                else:
-                    st.info("Kolom Profit tidak tersedia.")
-            with c4:
-                if "Hotel_City" in df_view.columns:
-                    _dt4 = _dt.dropna(subset=["Hotel_City"]).copy() if "Hotel_City" in _dt.columns else pd.DataFrame()
-                    if not _dt4.empty:
-                        _cy_s = (_dt4.groupby(["_ml","_mn"],as_index=False)["Hotel_City"]
-                                 .nunique().rename(columns={"Hotel_City":"Kota"}).sort_values("_mn"))
-                        st.markdown(
-                            '<div style="background:#fff;border:1px solid #E2E8F0;border-radius:12px;padding:16px 18px 4px;">'
-                            '<div style="font-size:.72rem;font-weight:700;color:#0F172A;margin-bottom:3px;">🗺️ Tren Kota Unik</div>'
-                            + _mini([("Max",str(int(_cy_s["Kota"].max()))),("Avg/bln",str(int(_cy_s["Kota"].mean())))])
-                            + '</div>', unsafe_allow_html=True)
-                        st.plotly_chart(theme(_linec(_cy_s,"_ml","Kota",color="#134E4A",fill="rgba(19,78,74,.07)")), use_container_width=True)
-                else:
-                    st.info("Kolom Hotel_City tidak tersedia.")
-
-        # ── Distribusi ─────────────────────────────────────────────────────────
-        gsec("🏢 Distribusi &amp; Analisis")
-        dch1, dch2 = st.columns(2)
-        with dch1:
-            inv_col = ("Normalized_Inv_To" if "Normalized_Inv_To" in df_view.columns
-                       else ("Invoice To" if "Invoice To" in df_view.columns else None))
-            if inv_col and "Invoice No" in df_view.columns:
-                _dfi = (df_view[[inv_col,"Invoice No"]]
-                        .dropna(subset=[inv_col])
-                        .assign(**{inv_col: lambda d: d[inv_col].astype(str).str.strip()})
-                        .pipe(lambda d: d[~d[inv_col].isin(["","nan","None","NaN","Unknown"])]))
-                _tot_inv = _dfi["Invoice No"].nunique()
-                _top10 = (_dfi.groupby(inv_col)["Invoice No"].nunique().reset_index()
-                          .rename(columns={"Invoice No":"Inv"})
-                          .sort_values("Inv", ascending=False).head(10))
-                _top10["Pct"] = (_top10["Inv"] / _tot_inv * 100).round(1)
-                _mx = int(_top10["Inv"].max())
-                _RC = [("#0D9488","#F0FDFA","#CCFBF1"),("#0F766E","#F0FDFA","#99F6E4"),
-                       ("#134E4A","#F0FDFA","#5EEAD4"),("#334155","#F8FAFC","#E2E8F0")]
-                rows = ""
-                for pos, (_, row) in enumerate(_top10.iterrows()):
-                    name = str(row[inv_col]); w = int(row["Inv"])/_mx*100
-                    ci = min(pos, 3); bc, bg, bd = _RC[ci]
-                    rbg = "#fff" if pos%2==0 else "#FAFBFC"
-                    rows += (
-                        f'<div style="display:grid;grid-template-columns:22px 1fr auto;align-items:center;'
-                        f'gap:9px;padding:7px 14px;background:{rbg};border-bottom:1px solid #F1F5F9;" '
-                        f'onmouseover="this.style.background=\'#F0FDFA\'" onmouseout="this.style.background=\'{rbg}\'">'
-                        f'<div style="width:20px;height:20px;border-radius:6px;display:flex;align-items:center;'
-                        f'justify-content:center;font-size:.58rem;font-weight:800;background:{bg};color:{bc};border:1px solid {bd};">{pos+1}</div>'
-                        f'<div><div style="font-size:.68rem;font-weight:600;color:#0F172A;margin-bottom:4px;">{name}</div>'
-                        f'<div style="display:flex;align-items:center;gap:6px;">'
-                        f'<div style="flex:1;height:5px;background:#F1F5F9;border-radius:5px;overflow:hidden;">'
-                        f'<div style="width:{w:.1f}%;height:100%;background:linear-gradient(90deg,{bc},#2DD4BF);border-radius:5px;"></div></div>'
-                        f'<span style="font-size:.54rem;color:#94A3B8;">{row["Pct"]:.1f}%</span></div></div>'
-                        f'<div style="text-align:right;">'
-                        f'<span style="font-family:\'Sora\',sans-serif;font-size:.78rem;font-weight:800;color:#0F172A;">{int(row["Inv"]):,}</span>'
-                        f'<div style="font-size:.5rem;color:#94A3B8;">invoice</div></div></div>')
-                st.markdown(
-                    '<div style="background:#fff;border:1px solid #E2E8F0;border-radius:12px;overflow:hidden;">'
-                    '<div style="padding:12px 16px 10px;border-bottom:1px solid #E2E8F0;'
-                    'display:flex;align-items:center;justify-content:space-between;'
-                    'background:linear-gradient(90deg,#F0FDFA,#fff);">'
-                    '<span style="font-size:.75rem;font-weight:700;color:#0F172A;">🏢 Top 10 Invoice To</span>'
-                    f'<span style="font-size:.55rem;color:#94A3B8;">dari {_tot_inv:,} unik</span></div>'
-                    + rows + '</div>',
-                    unsafe_allow_html=True)
-            else:
-                st.info("Kolom Invoice To tidak ditemukan.")
-
-        with dch2:
-            # Domestic vs International dari Product Type
-            _RCOLS = ["#0D9488","#0F766E","#14B8A6","#5EEAD4","#99F6E4"]
-            if "Product Type" in df_view.columns and "Invoice No" in df_view.columns:
-                _dfd = (df_view[["Product Type","Invoice No"]]
-                        .dropna(subset=["Product Type"])
-                        .assign(**{"Product Type": lambda d: d["Product Type"].astype(str).str.strip()})
-                        .pipe(lambda d: d[~d["Product Type"].isin(["","nan","None","NaN"])]))
-                _dg = (_dfd.groupby("Product Type")["Invoice No"].nunique().reset_index()
-                       .rename(columns={"Invoice No":"Inv"}).sort_values("Inv", ascending=False))
-                _dgt = int(_dg["Inv"].sum())
-                _fmt = lambda n: (f"{n/1e6:.1f}M" if n>=1e6 else (f"{n/1e3:.1f}K" if n>=1e3 else str(n)))
-                segs = []
-                for idx, (_, row) in enumerate(_dg.iterrows()):
-                    pct = round(row["Inv"]/_dgt*100, 1) if _dgt > 0 else 0
-                    segs.append({
-                        "label": str(row["Product Type"]),
-                        "value": int(row["Inv"]),
-                        "pct":   pct,
-                        "color": _RCOLS[min(idx, len(_RCOLS)-1)]
-                    })
-                components.html(
-                    build_donut_html(segs, _fmt(_dgt), f"Berdasarkan invoice unik · {_fmt(_dgt)} total"),
-                    height=370, scrolling=False)
-                st.caption("*Domestic vs International dari kolom Product Type")
-            else:
-                st.info("Kolom Product Type tidak tersedia.")
-
-        # ── Preview Data ───────────────────────────────────────────────────────
-        gsec("&#9776; Preview Data")
-        _rpp = 50
-        _tp  = max(1, (_tr//_rpp) + int(_tr%_rpp > 0))
-        if "pg" not in st.session_state: st.session_state.pg = 0
-        if st.session_state.pg >= _tp: st.session_state.pg = 0
-        pc, pm2, pn = st.columns([1,5,1])
-        with pc:
-            if st.button("Prev", key="btn_prev") and st.session_state.pg > 0:
-                st.session_state.pg -= 1; st.rerun()
-        with pn:
-            if st.button("Next", key="btn_next") and st.session_state.pg < _tp-1:
-                st.session_state.pg += 1; st.rerun()
-        with pm2:
-            st.markdown(
-                f'<p style="text-align:center;font-size:.68rem;color:#475569;padding:9px 0;margin:0;">'
-                f'Hal&nbsp;{st.session_state.pg+1}&nbsp;/&nbsp;{_tp} &nbsp;·&nbsp; {_tr:,} baris</p>',
-                unsafe_allow_html=True)
-        _s = st.session_state.pg * _rpp
-        _e = _s + _rpp
-        st.dataframe(df_view.iloc[_s:_e], use_container_width=True)
-        _dc, _ec = st.columns(2)
-        with _dc:
-            st.download_button("⬇ Download CSV",
-                               df_view.to_csv(index=False).encode("utf-8"),
-                               "hotel_report.csv","text/csv",use_container_width=True)
-        with _ec:
-            _ob = io.BytesIO()
-            with pd.ExcelWriter(_ob, engine="xlsxwriter") as _w:
-                df_view.to_excel(_w, index=False, sheet_name="Report")
-            st.download_button("⬇ Download Excel", _ob.getvalue(),
-                               "hotel_report.xlsx",
-                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               use_container_width=True)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 2 — TREN INVOICE
-    # ══════════════════════════════════════════════════════════════════════════
-    with tab2:
-        ti2, tr2c = _cached_invoice_trend(_vh, df_view)
-        if ti2 is not None:
-            ca, cb = st.columns([3,2])
-            with ca:
-                gsec("Tren Invoice Bulanan","📈")
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=ti2["Bulan"], y=ti2["Invoice"], mode="lines+markers",
-                    line=dict(color="#0D9488",width=2.5,shape="spline"),
-                    marker=dict(size=9,color="#0D9488"),
-                    fill="tozeroy",fillcolor="rgba(13,148,136,.1)",
-                    hovertemplate="<b>%{x}</b><br>Invoice: <b>%{y:,.0f}</b><extra></extra>"))
-                fig.update_layout(xaxis_title="",yaxis_title="Invoice Unik",
-                                  hovermode="x unified",height=320)
-                st.plotly_chart(theme(fig), use_container_width=True)
-            with cb:
-                gsec("Ringkasan Bulanan","📋")
-                if tr2c is not None:
-                    _m = ti2[["Bulan","Invoice"]].merge(tr2c, on="Bulan", how="left")
-                    _m.columns = ["Bulan","Invoice Unik","Room Night"]
-                else:
-                    _m = ti2[["Bulan","Invoice"]].rename(columns={"Invoice":"Invoice Unik"})
-                st.dataframe(
-                    _m.style.format({c:"{:,.0f}" for c in _m.columns if _m[c].dtype!="O"})
-                    .background_gradient(subset=["Invoice Unik"],cmap="Purples"),
-                    use_container_width=True, height=320)
-            gsec("Volume Invoice per Bulan","📊")
-            fig2 = px.bar(ti2, x="Bulan", y="Invoice", text="Invoice", color="Invoice",
-                          color_continuous_scale=["rgba(99,102,241,.3)","#0D9488","#0D9488"])
-            fig2.update_traces(texttemplate="%{y:,.0f}", textposition="outside",
-                               textfont=dict(size=11,color="#8898AA"),
-                               marker_line_width=0, marker_cornerradius=4, cliponaxis=False)
-            fig2.update_layout(coloraxis_showscale=False, height=290, xaxis_title="", yaxis_title="")
-            st.plotly_chart(theme(fig2), use_container_width=True)
-        else:
-            st.warning("Kolom Issued Date atau Invoice No tidak ditemukan.")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 3 — SUPPLIER
-    # ══════════════════════════════════════════════════════════════════════════
-    with tab3:
-        ss3, d3 = _cached_supplier(_vh, df_view)
-        if ss3 is not None:
-            ca, cb = st.columns([3,2])
-            with ca:
-                gsec("Distribusi Supplier","🏢")
-                fig3 = px.pie(d3, names="Supplier_Name", values="Total Room Night",
-                              hole=0.52, color_discrete_sequence=GLASS_PALETTE)
-                fig3.update_traces(textinfo="percent+label", textfont=dict(size=11),
-                                   pull=[0.05]+[0]*(len(d3)-1),
-                                   marker=dict(line=dict(color="rgba(6,8,24,.8)",width=2)),
-                                   hovertemplate="<b>%{label}</b><br>Room Night: %{value:,.0f}<br>%{percent}<extra></extra>")
-                fig3.update_layout(height=360, legend=dict(orientation="v",yanchor="middle",y=.5,xanchor="left",x=1.02))
-                st.plotly_chart(theme(fig3), use_container_width=True)
-            with cb:
-                gsec("Top Supplier","📊")
-                fig3b = px.bar(ss3.head(10), x="Total Room Night", y="Supplier_Name",
-                               orientation="h", text="Total Room Night", color="Total Room Night",
-                               color_continuous_scale=TEAL_SCALE)
-                fig3b.update_traces(texttemplate="%{x:,.0f}", textposition="outside",
-                                    textfont=dict(size=10,color="#8898AA"),
-                                    marker_line_width=0, marker_cornerradius=4, cliponaxis=False)
-                fig3b.update_layout(yaxis=dict(categoryorder="total ascending"),
-                                    coloraxis_showscale=False, height=380, xaxis_title="", yaxis_title="")
-                st.plotly_chart(theme(fig3b), use_container_width=True)
-            gsec("Tabel Lengkap Supplier")
-            st.dataframe(
-                ss3.reset_index(drop=True)
-                .style.format({"Total Room Night":"{:,.0f}"})
-                .background_gradient(subset=["Total Room Night"],cmap="YlGnBu"),
-                use_container_width=True)
-        else:
-            st.warning("Kolom Supplier_Name atau Total Room Night tidak tersedia.")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 4 — PRODUCT TYPE
-    # ══════════════════════════════════════════════════════════════════════════
-    with tab4:
-        ps4, d4 = _cached_product(_vh, df_view)
-        if ps4 is not None:
-            ca, cb = st.columns([3,2])
-            with ca:
-                gsec("Distribusi Product Type","📦")
-                fig4 = px.pie(d4, names="Product Type", values="Total Room Night",
-                              hole=0.52, color_discrete_sequence=GLASS_PALETTE)
-                fig4.update_traces(textinfo="percent+label", textfont=dict(size=12),
-                                   pull=[0.05]+[0]*(len(d4)-1),
-                                   marker=dict(line=dict(color="rgba(6,8,24,.8)",width=2)),
-                                   hovertemplate="<b>%{label}</b><br>Room Night: %{value:,.0f}<br>%{percent}<extra></extra>")
-                fig4.update_layout(height=360)
-                st.plotly_chart(theme(fig4), use_container_width=True)
-            with cb:
-                gsec("Tabel Product Type","📋")
-                st.dataframe(
-                    d4.reset_index(drop=True)
-                    .style.format({"Total Room Night":"{:,.0f}"})
-                    .background_gradient(subset=["Total Room Night"],cmap="YlGnBu"),
-                    use_container_width=True, height=360)
-        else:
-            st.warning("Kolom Product Type atau Total Room Night tidak tersedia.")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 5 — AGENT SCORECARD
-    # ══════════════════════════════════════════════════════════════════════════
-    with tab5:
-        if "Agent" in df_view.columns and "Invoice No" in df_view.columns and "Total Room Night" in df_view.columns:
-            dfa = df_view.copy()
-            dfa["Agent"] = (dfa["Agent"].astype(str).str.strip().str.lower()
-                            .map(lambda x: AGENT_MAP.get(x, x.title())))
-            _null_ag = {"nan","none","","nat","<na>","n/a","null","-"}
-            dfa = dfa[~dfa["Agent"].str.lower().isin(_null_ag)]
-
-            def _pic_group(name):
-                nu = str(name).strip()
-                for p in KNOWN_PICS:
-                    if p.lower() == nu.lower():
-                        return p
-                return "Other"
-
-            dfa["PIC"] = dfa["Agent"].apply(_pic_group)
-
-            _n_months = 1
-            if "Issued Date" in dfa.columns:
-                _periods = dfa["Issued Date"].dropna().dt.to_period("M").unique()
-                _n_months = max(len(_periods), 1)
-            _ccol = ("Normalized_Inv_To" if "Normalized_Inv_To" in dfa.columns
-                     else ("Invoice To" if "Invoice To" in dfa.columns else None))
-
-            _known_with_data = [p for p in KNOWN_PICS if p in dfa["PIC"].unique()]
-            _has_other = "Other" in dfa["PIC"].unique()
-            _order = _known_with_data + (["Other"] if _has_other else [])
-
-            pic_data = {}
-            for _pic in _order:
-                _s = dfa[dfa["PIC"] == _pic]
-                if _s.empty: continue
-                _iu = int(_s["Invoice No"].nunique())
-                _rn = float(_s["Total Room Night"].sum())
-                _sa = float(_s["Sales AR"].fillna(0).astype(float).sum()) if "Sales AR" in _s.columns else 0.0
-                _pr = float(_s["Profit"].fillna(0).astype(float).sum())   if "Profit"   in _s.columns else 0.0
-                _avg_pm = None
-                if "Profit" in _s.columns and "Sales AR" in _s.columns:
-                    sf = pd.to_numeric(_s["Sales AR"], errors="coerce").fillna(0)
-                    pf = pd.to_numeric(_s["Profit"],   errors="coerce").fillna(0)
-                    mm = sf != 0
-                    if mm.any(): _avg_pm = float((pf[mm]/sf[mm]*100).mean())
-                _top_s = "\u2014"; _top_rn = 0
-                if "Supplier_Name" in _s.columns:
-                    _srn = (_s.groupby("Supplier_Name")["Total Room Night"].sum()
-                            .sort_values(ascending=False))
-                    _srn = _srn[~_srn.index.astype(str).str.strip().isin({"","nan","None","NaN","Unknown"})]
-                    if not _srn.empty: _top_s = str(_srn.index[0]); _top_rn = int(_srn.iloc[0])
-                _ait = dfa["Invoice No"].nunique()
-                _art = float(dfa["Total Room Night"].sum())
-                pic_data[_pic] = {
-                    "iu":_iu,"rn":_rn,"sa":_sa,"pr":_pr,
-                    "avg_inv":_iu/_n_months,
-                    "avg_rn":_rn/_iu if _iu > 0 else 0,
-                    "avg_sa":_sa/_iu if _iu > 0 else 0,
-                    "avg_pr":_pr/_iu if _iu > 0 else 0,
-                    "avg_pm":_avg_pm,
-                    "co":(int(_s[_ccol].dropna().nunique()) if _ccol else 0),
-                    "top_s":_top_s, "top_rn":_top_rn,
-                    "ip":(_iu/_ait*100 if _ait > 0 else 0),
-                    "rp":(_rn/_art*100 if _art > 0 else 0),
+            _ne_res = {"file": ne_files.name, "status": "error", "parsed": {}, "err": "", "mode": "nonexpedia"}
+            try:
+                _ts_final = st.session_state.get("_ne_prefill_ts", "").strip() or now_ts()
+                _inv_ai = st.session_state.get("_ne_prefill_bid", "").strip()
+                _card_ai = normalize_card(st.session_state.get("_ne_prefill_card", "").strip())
+                try:
+                    _total = int(st.session_state.get("_ne_prefill_room", "0") or 0)
+                except:
+                    _total = 0
+                _booking_id_final = ne_booking_id.strip() or _inv_ai
+                _catatan = _booking_id_final
+                if ne_extra_notes.strip():
+                    _catatan += " · " + ne_extra_notes.strip()
+                _parsed_ne = {
+                    "timestamp_input": _ts_final, "supplier": ne_supplier,
+                    "booking_id": _booking_id_final, "booked_on": ne_booked_on,
+                    "issued_on": ne_issued_on, "hotel": ne_hotel.strip(),
+                    "checkin": ne_checkin, "qty": ne_qty.strip(), "room": _total,
+                    "checkout": ne_checkout, "name": ne_name.strip(), "card": _card_ai,
+                    "issuer": bulk_issuer, "pic": bulk_pic.strip(),
+                    "no_bc": bulk_no_bc.strip(), "nama_kegiatan": bulk_nama_kegiatan.strip(),
+                    "notes": _catatan,
                 }
+                save_row(_parsed_ne)
+                _ne_res.update(status="success", parsed=_parsed_ne)
+                st.session_state["bulk_saved_count"] = 1
+            except Exception as _exc_ne:
+                _ne_res.update(err=str(_exc_ne)[:200])
+            st.session_state["bulk_results"] = [_ne_res]
+            st.rerun()
 
-            def _ini(n):
-                p = str(n).split()
-                if len(p) >= 2: return (p[0][0]+p[1][0]).upper()
-                return str(n)[:2].upper() if len(str(n)) >= 2 else str(n).upper()
-
-            def _bar_html(pct):
-                w = min(float(pct), 100)
-                return '<div class="p2-bar"><div class="p2-bf" style="width:' + f"{w:.1f}" + '%;"></div></div>'
-
-            def _mrow_html(icon, label, val, hint="", bp=None):
-                bh = _bar_html(bp) if bp is not None else ""
-                hh = '<div class="p2m-h">' + hint + '</div>' if hint else ""
-                return (
-                    '<div class="p2-mr">'
-                    '<div class="p2m-top">'
-                    '<span class="p2m-ic">' + icon + '</span>'
-                    '<span class="p2m-lb">' + label + '</span>'
-                    '</div>'
-                    '<div class="p2m-v">' + val + '</div>'
-                    + hh + bh + '</div>'
-                )
-
-            def _build_card(pic, d):
-                is_other = (pic == "Other")
-                ini  = _ini(pic)
-                cls  = "p2-card oth" if is_other else "p2-card"
-                sa_s = compact_num(d["sa"]) if d["sa"] else "\u2014"
-                pr_s = compact_num(d["pr"]) if d["pr"] else "\u2014"
-                as_s = compact_num(d["avg_sa"]) if d["avg_sa"] else "\u2014"
-                ap_s = compact_num(d["avg_pr"]) if d["avg_pr"] else "\u2014"
-                pm_raw = None; pm_s = "\u2014"
-                if d["sa"] and d["pr"] and d["sa"] > 0:
-                    pm_raw = d["pr"] / d["sa"] * 100
-                    pm_s   = f"{pm_raw:.1f}%"
-                apm_s = f"{d['avg_pm']:.1f}%" if d.get("avg_pm") is not None else "\u2014"
-                photo = _load_avatar_b64(pic) if not is_other else ""
-                if photo:
-                    av = '<div class="p2av photo"><img src="' + photo + '" alt="' + pic + '"/></div>'
+    # ── Results ───────────────────────────────────────────────────────────────
+    _results = st.session_state.get("bulk_results", [])
+    if _results:
+        _ok  = sum(1 for r in _results if r["status"] == "success")
+        _err = sum(1 for r in _results if r["status"] == "error")
+        _skip = sum(1 for r in _results if r["status"] == "skipped")
+        _tot = len(_results)
+        _pct = int(_ok / _tot * 100) if _tot else 0
+        st.markdown(
+            '<div class="bulk-sum"><div class="bulk-sum-ttl">Hasil Proses</div>'
+            + '<div class="bulk-stats">'
+            + f'<div><div class="bs-val">{_tot}</div><div class="bs-lbl">Total</div></div>'
+            + f'<div><div class="bs-val bs-g">{_ok}</div><div class="bs-lbl">Tersimpan</div></div>'
+            + f'<div><div class="bs-val bs-r">{_err}</div><div class="bs-lbl">Gagal</div></div>'
+            + f'<div><div class="bs-val bs-y">{_skip}</div><div class="bs-lbl">Duplikat</div></div>'
+            + "</div>"
+            + f'<div class="bulk-bar"><div class="bulk-bar-f" style="width:{_pct}%"></div></div>'
+            + f'<div class="bulk-pct">{_pct}% tersimpan</div></div>',
+            unsafe_allow_html=True,
+        )
+        for _r in _results:
+            _s = _r["status"]; _p = _r.get("parsed", {}); _fn = _r["file"]; _rmode = _r.get("mode", "expedia")
+            _ic = {"success": "ic-ok", "error": "ic-err", "skipped": "ic-skip"}.get(_s, "ic-n")
+            _bc = {"success": "fb-ok", "error": "fb-err", "skipped": "fb-sk"}.get(_s, "fb-ok")
+            _sy = {"success": "&#10003;", "error": "&#10005;", "skipped": "&#9888;"}.get(_s, "")
+            _lb = {"success": "Tersimpan", "error": "Gagal", "skipped": "Duplikat"}.get(_s, _s)
+            _wc = {"success": "fi-success", "error": "fi-error", "skipped": "fi-skipped"}.get(_s, "")
+            if _p and _s in ("success", "skipped"):
+                _dw = (
+                    '<div style="margin-top:7px;font-size:11px;color:#7a5c00;background:#fef9c3;'
+                    'padding:5px 9px;border-radius:8px">&#9888; ' + _r.get("err", "Duplikat") + "</div>"
+                ) if _s == "skipped" else ""
+                if _rmode == "nonexpedia":
+                    _det = (
+                        '<div style="margin-top:5px"><span style="font-size:9px;color:#7a5c00;'
+                        'background:#fef9c3;border:1px solid #fcd34d;border-radius:5px;'
+                        'padding:2px 7px;font-weight:600">🧾 Non-Expedia</span></div>'
+                        + '<div class="fi-grid">'
+                        + '<div class="fi-kv"><span class="fi-k">Hotel</span><span class="fi-v">' + (_p.get("hotel") or "—") + "</span></div>"
+                        + '<div class="fi-kv"><span class="fi-k">Total</span><span class="fi-v">' + fmt(_p.get("room", 0)) + "</span></div>"
+                        + '<div class="fi-kv"><span class="fi-k">Tamu</span><span class="fi-v">' + (_p.get("name") or "—") + "</span></div>"
+                        + '<div class="fi-kv"><span class="fi-k">Kartu</span><span class="fi-v">' + (_p.get("card") or "—") + "</span></div>"
+                        + '<div class="fi-kv"><span class="fi-k">Booking</span><span class="fi-v">' + (_p.get("booking_id") or "—") + "</span></div>"
+                        + '<div class="fi-kv"><span class="fi-k">Waktu</span><span class="fi-v">' + (_p.get("timestamp_input") or "—") + "</span></div>"
+                        + "</div>" + _dw
+                    )
                 else:
-                    av = '<div class="p2av">' + ini + '</div>'
-                sh_txt = f'{d["ip"]:.1f}% inv \u00b7 {d["rp"]:.1f}% RN'
-                sh = ('<div class="p2-sh">'
-                      '<span class="p2-sh-dot"></span>'
-                      '<span class="p2-sh-txt">' + sh_txt + '</span>'
-                      '</div>')
-                pm_c  = "#059669" if (pm_raw is not None and pm_raw  >= 0) else "#DC2626"
-                apm_c = "#059669" if (d.get("avg_pm") is not None and d["avg_pm"] >= 0) else "#DC2626"
-
-                top_block = (
-                    '<div class="' + cls + '">'
-                    '<div class="p2-banner">'
-                    + av +
-                    '<div class="p2-bi">'
-                    '<div class="p2-name">' + pic + '</div>'
-                    '<div class="p2-role">Hotel Bookers \u00b7 MTT</div>'
-                    + sh +
-                    '</div></div>'
+                    _det = (
+                        '<div class="fi-grid">'
+                        + '<div class="fi-kv"><span class="fi-k">Hotel</span><span class="fi-v">' + (_p.get("hotel") or "—") + "</span></div>"
+                        + '<div class="fi-kv"><span class="fi-k">Total</span><span class="fi-v">' + fmt(_p.get("room", 0)) + "</span></div>"
+                        + '<div class="fi-kv"><span class="fi-k">Tamu</span><span class="fi-v">' + (_p.get("name") or "—") + "</span></div>"
+                        + '<div class="fi-kv"><span class="fi-k">Booking</span><span class="fi-v">' + (_p.get("booking_id") or "—") + "</span></div>"
+                        + '<div class="fi-kv"><span class="fi-k">Check-in</span><span class="fi-v">' + (_p.get("checkin") or "—") + "</span></div>"
+                        + '<div class="fi-kv"><span class="fi-k">Supplier</span><span class="fi-v">' + (_p.get("supplier") or "—") + "</span></div>"
+                        + "</div>" + _dw
+                    )
+            elif _r.get("err"):
+                _det = (
+                    '<div class="fi-grid" style="grid-template-columns:1fr">'
+                    '<div class="fi-kv"><span class="fi-k">Error</span>'
+                    '<span class="fi-v" style="color:#e53935;white-space:normal">'
+                    + _r["err"] + "</span></div></div>"
                 )
-                body_block = (
-                    '<div class="p2-body">'
-                    '<div class="p2-slbl">&#x1F4CB; Volume</div>'
-                    '<div class="p2-mg">'
-                    + _mrow_html("\U0001F9FE","Invoice",f'{d["iu"]:,}',f'avg {d["avg_inv"]:.1f}/bln',d["ip"])
-                    + _mrow_html("\U0001F319","Room Night",compact_num(d["rn"]),f'avg {d["avg_rn"]:.1f}/inv',d["rp"])
-                    + '</div>'
-                    '<div class="p2-slbl">&#x1F4B0; Finansial</div>'
-                    '<div class="p2-mg">'
-                    + _mrow_html("\U0001F4E6","Sales AR",sa_s,"avg " + as_s + "/inv")
-                    + _mrow_html("\U0001F4C8","Profit",pr_s,"avg " + ap_s + "/inv")
-                    + '</div>'
-                    '<div class="p2-ms">'
-                    '<div class="p2-ml">'
-                    '<div class="p2-mslb">Profit Margin</div>'
-                    '<div class="p2-msv" style="color:' + pm_c + ';">' + pm_s + '</div>'
-                    '<div style="margin-top:7px;padding-top:7px;border-top:1px dashed rgba(13,148,136,.22);">'
-                    '<div class="p2-mslb" style="margin-bottom:2px;">Avg PM</div>'
-                    '<div style="font-family:\'Sora\',sans-serif;font-size:.82rem;font-weight:700;color:' + apm_c + ';">' + apm_s + '</div>'
-                    '</div></div>'
-                    '<div class="p2-mr2">'
-                    '<div class="p2-mslb">Companies</div>'
-                    '<div class="p2-msv">' + f'{d["co"]:,}' + '</div>'
-                    '</div></div>'
-                    '</div>'
-                )
-                if d["top_s"] != "\u2014":
-                    sh2 = d["top_s"][:26]+"…" if len(d["top_s"]) > 26 else d["top_s"]
-                    ft_inner = ('<div class="p2-sr">'
-                                '<span class="p2-sn">' + sh2 + '</span>'
-                                '<span class="p2-srn">' + f'{d["top_rn"]:,}' + ' RN</span>'
-                                '</div>')
-                else:
-                    ft_inner = '<span style="font-size:.65rem;color:#94A3B8;font-style:italic;">\u2014</span>'
-
-                footer_block = (
-                    '<div class="p2-ft">'
-                    '<div class="p2-ftlb">&#x1F3E8; Supplier Preference</div>'
-                    + ft_inner +
-                    '</div>'
-                )
-                return top_block + body_block + footer_block + '</div>'
-
-            _known_sorted = sorted(
-                _known_with_data,
-                key=lambda p: pic_data[p]["sa"] if p in pic_data else 0,
-                reverse=True)
-            _final_order = _known_sorted + (["Other"] if _has_other and "Other" in pic_data else [])
-
-            gsec("Scorecard PIC Agent","🏅")
+            else:
+                _det = ""
             st.markdown(
-                '<div class="p2-grid">'
-                + "".join(_build_card(p, pic_data[p]) for p in _final_order)
-                + '</div>',
-                unsafe_allow_html=True)
+                '<div class="file-item ' + _wc + '"><div class="fi-top">'
+                '<div class="fi-icon ' + _ic + '">📷</div>'
+                '<div class="fi-name">' + _fn + "</div>"
+                '<span class="fi-badge ' + _bc + '">' + _sy + " " + _lb + "</span>"
+                "</div>" + _det + "</div>",
+                unsafe_allow_html=True,
+            )
+        _sid = sheet_id()
+        if _sid and _ok:
+            st.link_button(
+                f"📊  Buka Google Sheets ({_ok} baris tersimpan)",
+                f"https://docs.google.com/spreadsheets/d/{_sid}",
+                use_container_width=True,
+            )
+        if _err:
+            notice("warn", f"{_err} file gagal.")
+    _render_footer()
 
-            gsec("Tabel Ringkasan Scorecard","📋")
-            _rows = []
-            for p in _final_order:
-                d = pic_data[p]
-                _sa2 = d["sa"] or 0; _pr2 = d["pr"] or 0
-                _rows.append({
-                    "PIC": p,
-                    "Invoice": d["iu"],
-                    "Avg Inv/Bln": round(d["avg_inv"],1),
-                    "Room Night": int(d["rn"]),
-                    "Avg RN/Inv": round(d["avg_rn"],1),
-                    "Sales AR": _sa2,
-                    "Avg Sales/Inv": round(d["avg_sa"],0),
-                    "Profit": _pr2,
-                    "Avg Profit/Inv": round(d["avg_pr"],0),
-                    "Profit Margin": f"{_pr2/_sa2*100:.1f}%" if _sa2 > 0 else "\u2014",
-                    "Companies": d["co"],
-                    "% Inv": round(d["ip"],1),
-                    "% RN": round(d["rp"],1),
-                    "Top Supplier": d["top_s"],
-                })
-            _df_sc = pd.DataFrame(_rows)
-            st.dataframe(
-                _df_sc.style.format({c:"{:,.0f}" for c in ["Invoice","Room Night","Sales AR","Profit"]}),
-                use_container_width=True)
-            _ob_sc = io.BytesIO()
-            with pd.ExcelWriter(_ob_sc, engine="xlsxwriter") as _w:
-                _df_sc.to_excel(_w, index=False, sheet_name="Scorecard")
-            st.download_button("⬇ Download Scorecard", _ob_sc.getvalue(),
-                               "scorecard_agent.xlsx",
-                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               use_container_width=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TAB — DASHBOARD  (DuckDB-powered)
+# ═══════════════════════════════════════════════════════════════════════════════
+elif st.session_state["tab"] == "dashboard":
+    import pandas as pd
+
+    if not _dashboard_login_wall():
+        _render_footer()
+        st.stop()
+
+    _cr, _cb2, _cb3 = st.columns([3, 1, 1])
+    _cr.markdown(
+        '<div class="sec-lbl" style="margin-top:4px">Ringkasan</div>',
+        unsafe_allow_html=True,
+    )
+    if _cb2.button("↻", type="secondary", use_container_width=True, key="dash_ref"):
+        # OPTIMIZATION: hanya clear cache_data (ringan), bukan cache_resource (berat)
+        load_rows_cached.clear()
+        _invalidate_duckdb()
+        st.rerun()
+    with _cb3:
+        _render_logout_button()
+
+    # Badge mode engine
+    _eng = "DuckDB ⚡" if _DUCK_OK else "Pandas"
+    _eng_col = "#7a5c00" if not _DUCK_OK else "#166534"
+    _eng_bg  = "#fef9c3" if not _DUCK_OK else "#f0fdf4"
+    _eng_bd  = "#fcd34d" if not _DUCK_OK else "#86efac"
+    st.markdown(
+        f'<div style="font-size:10px;font-weight:700;color:{_eng_col};'
+        f'background:{_eng_bg};border:1px solid {_eng_bd};'
+        f'padding:3px 10px;border-radius:20px;display:inline-flex;'
+        f'align-items:center;gap:5px;margin-bottom:10px;">'
+        f'Query engine: {_eng}</div>',
+        unsafe_allow_html=True,
+    )
+
+    try:
+        with st.spinner("Memuat data..."):
+            rows = load_rows()   # dari cache, sangat cepat saat reload
+
+        if not rows:
+            notice("info", "Belum ada transaksi.")
         else:
-            st.warning("Kolom Agent, Invoice No, atau Total Room Night tidak ditemukan.")
+            df_full = pd.DataFrame(rows)
+            if "Total (Rp)" in df_full.columns:
+                df_full["Total (Rp)"] = pd.to_numeric(df_full["Total (Rp)"], errors="coerce").fillna(0)
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 6 — PTM CORP
-    # ══════════════════════════════════════════════════════════════════════════
-    with tab6:
-        dfh = _cached_ptm(_vh, df_view)
-        if dfh is None:
-            st.warning("Kolom Supplier_Name, Hotel_Name, atau Total Room Night tidak ditemukan.")
-        elif isinstance(dfh, pd.DataFrame) and dfh.empty:
-            st.warning("Tidak ditemukan data Supplier PTM/Corp Rate.")
+            tn = len(df_full)
+            tr = df_full["Total (Rp)"].sum() if "Total (Rp)" in df_full.columns else 0
+            avg = tr / tn if tn else 0
+            tds = datetime.now().strftime("%d/%m/%Y")
+            tdc = int(
+                df_full["Timestamp Input"].astype(str).str.startswith(tds).sum()
+            ) if "Timestamp Input" in df_full.columns else 0
+
+            st.markdown(
+                '<div class="stat-grid">'
+                + f'<div class="stat-card"><div class="stat-val">{tn}</div><div class="stat-lbl">Total transaksi</div></div>'
+                + f'<div class="stat-card"><div class="stat-val" style="font-size:16px">{fmt(tr)}</div><div class="stat-lbl">Total pengeluaran</div></div>'
+                + f'<div class="stat-card"><div class="stat-val" style="font-size:16px">{fmt(avg)}</div><div class="stat-lbl">Rata-rata</div></div>'
+                + f'<div class="stat-card"><div class="stat-val">{tdc}</div><div class="stat-lbl">Hari ini</div></div>'
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+
+            st.markdown('<div class="sec-lbl">Filter</div>', unsafe_allow_html=True)
+            _date_opts = [c for c in ["Check-in", "Booking Date", "Issued Date", "Timestamp Input"]
+                          if c in df_full.columns]
+            _fa, _fb, _fc = st.columns([2, 1, 1])
+            with _fa:
+                _filter_col = st.selectbox(
+                    "Kolom tanggal", options=_date_opts, index=0,
+                    label_visibility="collapsed", key="dash_filter_col",
+                )
+
+            # Parse tanggal untuk date range picker
+            _df_dated = df_full.copy()
+            _df_dated["_pd"] = pd.to_datetime(_df_dated[_filter_col].astype(str), dayfirst=True, errors="coerce")
+            _valid = _df_dated["_pd"].dropna()
+            _date_from = _date_to = None
+
+            if not _valid.empty:
+                _min_date = _valid.min().date()
+                _max_date = _valid.max().date()
+                with _fb:
+                    _date_from = st.date_input(
+                        "Dari", value=_min_date, min_value=_min_date,
+                        max_value=_max_date, label_visibility="collapsed", key="dash_date_from",
+                    )
+                with _fc:
+                    _date_to = st.date_input(
+                        "Sampai", value=_max_date, min_value=_min_date,
+                        max_value=_max_date, label_visibility="collapsed", key="dash_date_to",
+                    )
+
+            # Search bar
+            srch = st.text_input(
+                "", placeholder="🔍  Cari hotel / tamu / booking ID...",
+                label_visibility="collapsed", key="srch",
+            )
+
+            # ── QUERY VIA DUCKDB (atau pandas fallback) ──────────────────────
+            _ensure_duckdb(rows)
+            df = query_duckdb(
+                rows,
+                date_col=_filter_col if _date_from else None,
+                date_from=_date_from,
+                date_to=_date_to,
+                search=srch,
+            )
+
+            if "Total (Rp)" in df.columns:
+                df["Total (Rp)"] = pd.to_numeric(df["Total (Rp)"], errors="coerce").fillna(0)
+
+            _fn2 = len(df)
+            _tr2 = df["Total (Rp)"].sum() if "Total (Rp)" in df.columns else 0
+            _avg2 = _tr2 / _fn2 if _fn2 else 0
+
+            if _fn2 != tn or srch:
+                st.markdown(
+                    '<div style="display:flex;gap:6px;margin-bottom:10px;">'
+                    + f'<div style="flex:1;background:#e8f0fe;border-radius:12px;padding:9px 12px;">'
+                    + f'<div style="font-size:10px;color:#1e3a6e;">Terfilter</div>'
+                    + f'<div style="font-size:17px;font-weight:700;color:#191d3a;">{_fn2}</div></div>'
+                    + f'<div style="flex:1;background:#e8f0fe;border-radius:12px;padding:9px 12px;">'
+                    + f'<div style="font-size:10px;color:#1e3a6e;">Total</div>'
+                    + f'<div style="font-size:14px;font-weight:700;color:#191d3a;">{fmt(_tr2)}</div></div>'
+                    + f'<div style="flex:1;background:#e8f0fe;border-radius:12px;padding:9px 12px;">'
+                    + f'<div style="font-size:10px;color:#1e3a6e;">Rata-rata</div>'
+                    + f'<div style="font-size:14px;font-weight:700;color:#191d3a;">{fmt(_avg2)}</div></div>'
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # ── Kartu Kredit agregasi via DuckDB ─────────────────────────────
+            if "Kartu Kredit" in df.columns and "Total (Rp)" in df.columns:
+                df["Kartu Kredit"] = df["Kartu Kredit"].astype(str).apply(normalize_card)
+                _card_str = df["Kartu Kredit"].astype(str).str.strip().str.lower()
+                _cc = df[_card_str.ne("") & _card_str.ne("nan") & _card_str.ne("none")]
+                if not _cc.empty:
+                    st.markdown('<div class="sec-lbl">Kartu Kredit</div>', unsafe_allow_html=True)
+                    _grp = (
+                        _cc.groupby("Kartu Kredit")["Total (Rp)"]
+                        .sum().sort_values(ascending=False).reset_index()
+                    )
+                    _grp.columns = ["label", "val"]
+                    _tot2 = _grp["val"].sum()
+                    _cnt = _cc.groupby("Kartu Kredit").size()
+                    _h = ""
+                    for _, _row in _grp.iterrows():
+                        _p = _row["val"] / _tot2 * 100 if _tot2 else 0
+                        _a = "Rp {:,.0f}".format(_row["val"]).replace(",", ".")
+                        _c = int(_cnt.get(_row["label"], 0))
+                        _h += (
+                            f'<div style="padding:11px 0;border-bottom:1.5px solid #ededed">'
+                            f'<div style="display:flex;justify-content:space-between;margin-bottom:5px">'
+                            f'<span style="font-size:13px;font-weight:600;color:#191d3a">{_row["label"]}</span>'
+                            f'<span style="font-size:13px;font-weight:700;color:#191d3a">{_a}</span></div>'
+                            f'<div style="display:flex;align-items:center;gap:8px">'
+                            f'<div style="flex:1;background:#e8e8e8;border-radius:4px;height:4px">'
+                            f'<div style="width:{int(_p)}%;background:#6398c8;border-radius:4px;height:4px"></div></div>'
+                            f'<span style="font-size:11px;color:#9e9e9e;white-space:nowrap">{_p:.1f}% · {_c} trx</span>'
+                            f"</div></div>"
+                        )
+                    st.markdown(
+                        f'<div style="background:#fff;border:1.5px solid #ddd;border-radius:16px;padding:4px 14px">{_h}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+            st.markdown('<div class="sec-lbl">Data transaksi</div>', unsafe_allow_html=True)
+            _disp = df.iloc[::-1].reset_index(drop=True).copy()
+            if "Booking ID" in _disp.columns:
+                _disp["Booking ID"] = _disp["Booking ID"].astype(str)
+            _cfg = {}
+            if "Booking ID" in _disp.columns:
+                _cfg["Booking ID"] = st.column_config.TextColumn("Booking ID")
+            if "Total (Rp)" in _disp.columns:
+                _cfg["Total (Rp)"] = st.column_config.NumberColumn("Total (Rp)", format="Rp %d")
+            if "Room x Night" in _disp.columns:
+                _cfg["Room x Night"] = st.column_config.TextColumn("Room × Night")
+            if "Timestamp Input" in _disp.columns:
+                _cfg["Timestamp Input"] = st.column_config.TextColumn("Timestamp")
+            st.dataframe(_disp, use_container_width=True, height=320, column_config=_cfg, hide_index=True)
+
+    except Exception as e:
+        notice("err", str(e))
+    _render_footer()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TAB — ACTIVITY LOG
+# ═══════════════════════════════════════════════════════════════════════════════
+elif st.session_state["tab"] == "log":
+    try:
+        with st.spinner("Memuat data..."):
+            rows = load_rows()
+        if not rows:
+            notice("info", "Belum ada data transaksi.")
         else:
-            ca, cb = st.columns([3,2])
-            with ca:
-                gsec("Top Hotel PTM Corp Rate","🏨")
-                fh = px.bar(dfh.head(15), x="Total Room Night", y="Hotel_Name",
-                            orientation="h", text="Total Room Night", color="Total Room Night",
-                            color_continuous_scale=["rgba(252,211,77,.2)","rgba(252,211,77,.6)","#2DD4BF"])
-                fh.update_traces(texttemplate="%{x:,.0f}", textposition="outside",
-                                 textfont=dict(size=11,color="#8898AA"),
-                                 marker_line_width=0, marker_cornerradius=4, cliponaxis=False)
-                fh.update_layout(yaxis=dict(categoryorder="total ascending",automargin=True),
-                                 coloraxis_showscale=False, height=460,
-                                 xaxis_title="", yaxis_title="",
-                                 margin=dict(l=8,r=80,t=30,b=8))
-                st.plotly_chart(theme(fh), use_container_width=True)
-            with cb:
-                gsec("Tabel Hotel PTM","📋")
-                st.dataframe(
-                    dfh.head(20).reset_index(drop=True)
-                    .style.format({"Total Room Night":"{:,.0f}"})
-                    .background_gradient(subset=["Total Room Night"],cmap="YlGnBu"),
-                    use_container_width=True, height=400)
-                _ob3 = io.BytesIO()
-                with pd.ExcelWriter(_ob3, engine="xlsxwriter") as _w:
-                    dfh.to_excel(_w, index=False, sheet_name="Hotel_PTM")
-                st.download_button("⬇ Download", _ob3.getvalue(), "hotel_ptm.xlsx",
-                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                   use_container_width=True)
+            import pandas as pd
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # TAB 7 — KATEGORI SUPPLIER
-    # ══════════════════════════════════════════════════════════════════════════
-    with tab7:
-        cs7, d7 = _cached_cat(_vh, df_view)
-        if cs7 is not None:
-            ca, cb = st.columns([3,2])
-            with ca:
-                gsec("Distribusi Kategori Supplier","🎯")
-                fc7 = px.pie(d7, names="Supplier_Category", values="Total Room Night",
-                             hole=0.52, color_discrete_sequence=GLASS_PALETTE)
-                fc7.update_traces(textinfo="percent+label", textfont=dict(size=12),
-                                  pull=[0.05]+[0]*(len(d7)-1),
-                                  marker=dict(line=dict(color="rgba(6,8,24,.8)",width=2)),
-                                  hovertemplate="<b>%{label}</b><br>Room Night: %{value:,.0f}<extra></extra>")
-                fc7.update_layout(height=380)
-                st.plotly_chart(theme(fc7), use_container_width=True)
-            with cb:
-                gsec("Tabel Kategori","📋")
-                st.dataframe(
-                    cs7.reset_index(drop=True)
-                    .style.format({"Total Room Night":"{:,.0f}"})
-                    .background_gradient(subset=["Total Room Night"],cmap="YlGnBu"),
-                    use_container_width=True, height=380)
-        else:
-            st.warning("Kolom Supplier_Category atau Total Room Night tidak tersedia.")
+            df_log = pd.DataFrame(rows)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# EMPTY STATE
-# ══════════════════════════════════════════════════════════════════════════════
-else:
-    for k in ["df_raw","upload_hash"]:
-        st.session_state.pop(k, None)
-    st.markdown("""
-    <div style="display:flex;flex-direction:column;align-items:center;padding:80px 40px;
-                text-align:center;max-width:480px;margin:60px auto 0;">
-      <div style="width:64px;height:64px;margin-bottom:24px;background:#F0FDFA;
-                  border:1px solid #CCFBF1;border-radius:16px;display:grid;place-items:center;">
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#0D9488"
-             stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
-          <polyline points="13 2 13 9 20 9"/>
-        </svg>
-      </div>
-      <div style="font-family:'DM Sans',sans-serif;font-size:1.05rem;font-weight:700;
-                  color:#0F172A;margin-bottom:10px;">Belum ada data</div>
-      <p style="font-size:.72rem;color:#94A3B8;line-height:1.9;margin:0 auto 28px;">
-        Upload file Excel Custom Report di sidebar kiri, lalu klik
-        <span style="color:#0D9488;font-weight:600;background:#F0FDFA;padding:1px 7px;
-                     border-radius:5px;border:1px solid #CCFBF1;">Sync Data</span>
-        untuk normalisasi dari Google Drive.
-      </p>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">
-        <span style="font-size:.62rem;padding:6px 14px;border-radius:20px;
-              background:#F0FDFA;color:#0D9488;border:1px solid #CCFBF1;">Custom Report .xlsx</span>
-        <span style="font-size:.62rem;padding:6px 14px;border-radius:20px;
-              background:#F8FAFC;color:#64748B;border:1px solid #E2E8F0;">Google Drive Sync</span>
-        <span style="font-size:.62rem;padding:6px 14px;border-radius:20px;
-              background:#F0FDFA;color:#0D9488;border:1px solid #CCFBF1;">v9.3 Fixed</span>
-      </div>
-    </div>""", unsafe_allow_html=True)
+            def _pts(v):
+                try:
+                    return pd.to_datetime(str(v), dayfirst=True)
+                except:
+                    return pd.NaT
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FOOTER
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-<div style="margin-top:56px;border-top:1px solid #E2E8F0;background:#fff;">
-  <div style="background:#F0FDFA;border-bottom:1px solid #CCFBF1;padding:10px 36px;display:flex;gap:10px;">
-    <span style="font-size:.8rem;flex-shrink:0;">⚠️</span>
-    <p style="margin:0;font-size:.6rem;color:#0F766E;line-height:1.8;">
-      <strong style="color:#0D9488;">DISCLAIMER · </strong>
-      Data bersifat internal dan rahasia — dilarang disebarluaskan tanpa izin tertulis dari manajemen MTT.
-    </p>
+            df_log["_ts"] = df_log["Timestamp Input"].apply(_pts)
+            df_log = df_log.sort_values("_ts", ascending=False).reset_index(drop=True)
+            _total = len(df_log)
+            _recent = df_log.head(10)
+
+            st.markdown(
+                f'<div style="display:flex;align-items:center;justify-content:space-between;margin:4px 0 10px;">'
+                f'<div class="sec-lbl" style="margin:0;border:none;padding:0;">Activity Log</div>'
+                f'<span style="font-size:10px;color:#9e9e9e;font-weight:500;">10 dari {_total}</span></div>',
+                unsafe_allow_html=True,
+            )
+            _items_html = ""
+            for _, _row in _recent.iterrows():
+                _ts = str(_row.get("Timestamp Input", "—"))
+                _bid = str(_row.get("Booking ID", "—"))
+                _hotel = str(_row.get("Hotel", "")) or "—"
+                _issuer = str(_row.get("Issuer", "")) or "—"
+                _total_r = _row.get("Total (Rp)", 0)
+                try:
+                    _amt = "Rp {:,}".format(int(float(_total_r))).replace(",", ".")
+                except:
+                    _amt = "—"
+                _items_html += f"""
+<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;
+    background:#fff;border-radius:12px;border:0.5px solid #e8e8e8;margin-bottom:6px;">
+  <div style="width:36px;height:36px;border-radius:10px;background:#f5f5f5;
+      display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:16px;">🏨</div>
+  <div style="flex:1;min-width:0;">
+    <div style="font-size:13px;font-weight:600;color:#191d3a;
+        overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_hotel}</div>
+    <div style="font-size:10px;color:#9e9e9e;margin-top:1px;
+        overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_bid} · {_issuer}</div>
   </div>
-  <div style="padding:12px 36px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;">
-    <span style="font-size:.6rem;color:#94A3B8;">&copy; 2025 <strong style="color:#0D9488;">Hotel Intelligence</strong> · MTT</span>
-    <span style="font-size:.6rem;color:#94A3B8;">Powered by Streamlit · v9.3 Fixed</span>
-    <span style="font-size:.6rem;color:#94A3B8;">Built by <strong style="color:#0D9488;">Rifyal Tumber</strong> · MTT · 2025</span>
+  <div style="text-align:right;flex-shrink:0;">
+    <div style="font-size:12px;font-weight:600;color:#191d3a;">{_amt}</div>
+    <div style="font-size:9px;color:#bbb;margin-top:1px;">{_ts}</div>
   </div>
-</div>""", unsafe_allow_html=True)
+</div>"""
+            st.markdown(_items_html, unsafe_allow_html=True)
+    except Exception as e:
+        notice("err", str(e))
+    _render_footer()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TAB — SETTINGS
+# ═══════════════════════════════════════════════════════════════════════════════
+elif st.session_state["tab"] == "settings":
+    _cur_prov = get_ai_provider()
+    _active_lbl = "OpenAI" if _cur_prov == "openai" else "Claude"
+
+    st.markdown('<div class="sec-lbl" style="margin-top:4px">AI Provider</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ai-card-btn-wrap">', unsafe_allow_html=True)
+    if st.button(
+        f"{'✦ ' if _cur_prov=='claude' else ''}Claude AI · claude-sonnet-4-5  ★ Default",
+        key="sel_claude", use_container_width=True,
+        type="primary" if _cur_prov == "claude" else "secondary",
+    ):
+        st.session_state["ai_provider"] = "claude"
+        st.rerun()
+    if st.button(
+        f"{'✦ ' if _cur_prov=='openai' else ''}OpenAI · gpt-4o-mini",
+        key="sel_openai", use_container_width=True,
+        type="primary" if _cur_prov == "openai" else "secondary",
+    ):
+        st.session_state["ai_provider"] = "openai"
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="ai-status-bar"><div class="ai-status-dot"></div>'
+        f'<span class="ai-status-txt">Active: {_active_lbl}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="sec-lbl" style="margin-top:14px">API Keys</div>', unsafe_allow_html=True)
+    for _pname, _sskey, _section, _placeholder, _skey in [
+        ("Claude AI", "claude_key_manual", "anthropic", "sk-ant-api03-...", "inp_cla_key"),
+        ("OpenAI", "openai_key_manual", "openai", "sk-proj-...", "inp_oai_key"),
+    ]:
+        _secrets_ok = False
+        try:
+            k = st.secrets[_section]["api_key"]
+            if k and len(k) > 20 and "GANTI" not in k and "PASTE" not in k:
+                _secrets_ok = True
+        except:
+            pass
+        _ready = _secrets_ok or bool(st.session_state.get(_sskey, ""))
+        _dot_c = "#1D9E75" if _ready else "#e68900"
+        _lbl = "ready" if _ready else "belum dikonfigurasi"
+        _lcls = "ai-key-ok" if _ready else "ai-key-warn"
+        st.markdown(
+            f'<div class="ai-key-row"><div class="ai-key-left">'
+            f'<div class="ai-key-dot" style="background:{_dot_c}"></div>'
+            f'<span class="ai-key-name">{_pname}</span></div>'
+            f'<span class="{_lcls}">{_lbl}</span></div>',
+            unsafe_allow_html=True,
+        )
+        if not _ready:
+            _nk = st.text_input(
+                _pname + " Key", value=st.session_state.get(_sskey, ""),
+                type="password", placeholder=_placeholder,
+                label_visibility="collapsed", key=_skey,
+            )
+            if _nk != st.session_state.get(_sskey, ""):
+                st.session_state[_sskey] = _nk
+                st.rerun()
+
+    st.markdown('<div class="sec-lbl">Google Sheets</div>', unsafe_allow_html=True)
+    sh_ok = False
+    try:
+        if st.secrets["google_sheets"]["sheet_id"] and st.secrets["gcp_service_account"]["client_email"]:
+            sh_ok = True
+    except:
+        pass
+    if sh_ok:
+        st.markdown(
+            '<div class="st-row"><div class="st-icon si-g">📊</div>'
+            '<div class="st-body"><div class="st-title">Google Sheets</div>'
+            '<div class="st-sub">Terhubung via service account</div></div>'
+            '<span class="st-badge bg">✓ Aktif</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="st-row"><div class="st-icon si-y">📊</div>'
+            '<div class="st-body"><div class="st-title">Google Sheets</div>'
+            '<div class="st-sub">Belum dikonfigurasi</div></div>'
+            '<span class="st-badge by">⚠ Belum</span></div>',
+            unsafe_allow_html=True,
+        )
+        notice("warn", "Isi <code>.streamlit/secrets.toml</code>")
+        ns = st.text_input(
+            "Sheet ID", value=st.session_state.get("sheet_id", ""),
+            label_visibility="collapsed", placeholder="1nvgMCmo...",
+        )
+        if ns != st.session_state.get("sheet_id", ""):
+            st.session_state["sheet_id"] = ns
+
+    # GAS URL (opsional)
+    st.markdown('<div class="sec-lbl">Google Apps Script (Opsional)</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:11px;color:#9e9e9e;margin-bottom:8px;line-height:1.6">'
+        "GAS Web App URL untuk load data lebih cepat — tanpa overhead OAuth.<br>"
+        "Kosongkan jika tidak digunakan.</div>",
+        unsafe_allow_html=True,
+    )
+    _gas_cur = st.session_state.get("gas_url", "") or (
+        st.secrets["google_sheets"].get("gas_url", "") if sh_ok else ""
+    )
+    _gas_in = st.text_input(
+        "GAS URL", value=_gas_cur,
+        placeholder="https://script.google.com/macros/s/.../exec",
+        label_visibility="collapsed", key="gas_url_input",
+    )
+    if _gas_in != st.session_state.get("gas_url", ""):
+        st.session_state["gas_url"] = _gas_in
+
+    st.markdown('<div class="sec-lbl">Status Sistem</div>', unsafe_allow_html=True)
+    if _PDF_OK:
+        st.markdown(
+            '<div class="st-row"><div class="st-icon si-b">📄</div>'
+            '<div class="st-body"><div class="st-title">PDF Upload</div>'
+            '<div class="st-sub">pypdfium2 terinstall</div></div>'
+            '<span class="st-badge bg">✓ Aktif</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="st-row"><div class="st-icon si-r">📄</div>'
+            '<div class="st-body"><div class="st-title">PDF Upload</div>'
+            '<div class="st-sub">pypdfium2 tidak terinstall</div></div>'
+            '<span class="st-badge br">✕ Nonaktif</span></div>',
+            unsafe_allow_html=True,
+        )
+        notice("err", "Jalankan: <code>pip install pypdfium2==4.30.0</code>")
+
+    if _DUCK_OK:
+        st.markdown(
+            '<div class="st-row"><div class="st-icon si-g">⚡</div>'
+            '<div class="st-body"><div class="st-title">DuckDB Query Engine</div>'
+            '<div class="st-sub">Filter & agregasi 10-50x lebih cepat</div></div>'
+            '<span class="st-badge bg">✓ Aktif</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="st-row"><div class="st-icon si-y">⚡</div>'
+            '<div class="st-body"><div class="st-title">DuckDB Query Engine</div>'
+            '<div class="st-sub">Fallback ke pandas</div></div>'
+            '<span class="st-badge by">⚠ Install opsional</span></div>',
+            unsafe_allow_html=True,
+        )
+        notice("warn", "Install opsional: <code>pip install duckdb</code>")
+
+    st.markdown('<div class="sec-lbl">Tentang</div>', unsafe_allow_html=True)
+    _active_model = "gpt-4o-mini (OpenAI)" if get_ai_provider() == "openai" else "claude-sonnet-4-5 (Anthropic)"
+    st.markdown(
+        f"""
+<div class="about-box">
+  <div class="about-ttl">AI Intelligent Automation Scanner v7</div>
+  <div class="about-r"><div class="about-k">Input</div>
+    <div class="about-v">Expedia/TAAP: PDF·JPG·PNG bulk | Non-Expedia: JPG·PNG + manual</div></div>
+  <div class="about-r"><div class="about-k">Output</div>
+    <div class="about-v">Google Sheets — 17 kolom</div></div>
+  <div class="about-r"><div class="about-k">Model AI</div>
+    <div class="about-v">{_active_model} <b>(aktif)</b></div></div>
+  <div class="about-r"><div class="about-k">Optimasi</div>
+    <div class="about-v">
+      ① get_all_values() — 3-5× lebih cepat dari get_all_records()<br>
+      ② cache_data TTL 10 mnt — pisah dari koneksi<br>
+      ③ DuckDB in-memory — filter &amp; agregasi columnar<br>
+      ④ GAS endpoint opsional — load tanpa OAuth overhead<br>
+      ⑤ save_row() auto-invalidate cache setelah tulis
+    </div>
+  </div>
+</div>""",
+        unsafe_allow_html=True,
+    )
+    _render_footer()
