@@ -590,6 +590,43 @@ def _cached_cat(vh, _df):
     d = pd.concat([top, pd.DataFrame([{"Supplier_Category":"Others","Total Room Night":tail_sum}])] if len(cs)>5 else [top], ignore_index=True)
     return cs, d
 
+@st.cache_data(show_spinner=False)
+def _cached_company(vh, _df):
+    """Agregasi per perusahaan: Invoice To → Invoice unik, Revenue (Sales AR), Room Night."""
+    inv_col = ("Normalized_Inv_To" if "Normalized_Inv_To" in _df.columns
+               else ("Invoice To" if "Invoice To" in _df.columns else None))
+    has_inv  = "Invoice No"       in _df.columns
+    has_sa   = "Sales AR"         in _df.columns
+    has_rn   = "Total Room Night" in _df.columns
+
+    if inv_col is None or not has_inv:
+        return None
+
+    # Kolom yang akan diagregasi
+    agg_cols = {inv_col, "Invoice No"}
+    if has_sa:  agg_cols.add("Sales AR")
+    if has_rn:  agg_cols.add("Total Room Night")
+
+    tmp = (_df[list(agg_cols)]
+           .dropna(subset=[inv_col])
+           .assign(**{inv_col: lambda d: d[inv_col].astype(str).str.strip()})
+           .pipe(lambda d: d[~d[inv_col].isin(["","nan","None","NaN","Unknown"])]))
+
+    if tmp.empty:
+        return None
+
+    grp_agg = {"Invoice No": pd.NamedAgg(column="Invoice No", aggfunc="nunique")}
+    if has_sa: grp_agg["Sales AR"]         = pd.NamedAgg(column="Sales AR",         aggfunc=lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum())
+    if has_rn: grp_agg["Total Room Night"] = pd.NamedAgg(column="Total Room Night", aggfunc=lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum())
+
+    co = tmp.groupby(inv_col).agg(**grp_agg).reset_index()
+    co.columns.name = None
+    co = co.rename(columns={inv_col: "Perusahaan", "Invoice No": "Total Invoice"})
+    if has_sa:
+        co["Avg Revenue/Inv"] = (co["Sales AR"] / co["Total Invoice"].replace(0, np.nan)).fillna(0)
+    co = co.sort_values("Total Invoice", ascending=False).reset_index(drop=True)
+    return co
+
 def get_prev_period_metrics(df_raw, df_view):
     try:
         if "Issued Date" not in df_raw.columns or df_view.empty:
@@ -1098,8 +1135,8 @@ if uploaded_files and "df_raw" in st.session_state:
     st.markdown(f'<div class="norm-bar"><span class="norm-cap">Norm</span>{ph}</div>',
                 unsafe_allow_html=True)
 
-    tab1,tab2,tab3,tab4,tab5,tab6,tab7 = st.tabs(
-        ["Summary","Tren Invoice","Supplier","Product Type","Agent","PTM Corp","Kategori"])
+    tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8 = st.tabs(
+        ["Summary","Tren Invoice","Supplier","Product Type","Agent","PTM Corp","Kategori","Perusahaan"])
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 1 — SUMMARY
@@ -1851,6 +1888,153 @@ if uploaded_files and "df_raw" in st.session_state:
                     width="stretch", height=380)
         else:
             st.warning("⚠️ Kolom **Supplier_Category** atau **Total Room Night** tidak tersedia.\n\n💡 Cek debug panel di sidebar. Kolom ini otomatis dibuat saat Sync Data berhasil.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 8 — PERUSAHAAN (Invoice To)
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab8:
+        co8 = _cached_company(_vh, df_view)
+        inv_col8 = ("Normalized_Inv_To" if "Normalized_Inv_To" in df_view.columns
+                    else ("Invoice To" if "Invoice To" in df_view.columns else None))
+        has_sa8  = "Sales AR"         in df_view.columns
+        has_rn8  = "Total Room Night" in df_view.columns
+
+        if co8 is None:
+            st.warning("⚠️ Kolom **Invoice To** atau **Invoice No** tidak ditemukan.\n\n💡 Cek debug panel di sidebar.")
+        else:
+            # ── KPI cards baris atas ──────────────────────────────────────────
+            _total_co  = len(co8)
+            _total_inv = int(co8["Total Invoice"].sum())
+            _total_sa  = float(co8["Sales AR"].sum())         if has_sa8 else None
+            _total_rn  = float(co8["Total Room Night"].sum()) if has_rn8 else None
+
+            def _kpi(icon, label, val, sub="", color="#0D9488"):
+                vs = "font-family:'Sora',sans-serif;font-size:1.6rem;font-weight:800;line-height:1;letter-spacing:-1px;color:#0F172A;margin-bottom:3px;"
+                h = (
+                    "<div style='background:#fff;border:1px solid #E2E8F0;border-radius:14px;overflow:hidden;'>",
+                    f"<div style='height:3px;background:{color};'></div>",
+                    "<div style='padding:16px 18px 14px;'>",
+                    f"<div style='width:36px;height:36px;border-radius:10px;background:#F0FDFA;border:1px solid #CCFBF1;display:grid;place-items:center;font-size:1rem;margin-bottom:10px;'>{icon}</div>",
+                    f"<div style='font-size:.52rem;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#94A3B8;margin-bottom:5px;'>{label}</div>",
+                    f"<div style='{vs}'>{val}</div>",
+                    f"<div style='font-size:.56rem;color:#94A3B8;'>{sub}</div>",
+                    "</div></div>",
+                )
+                return "".join(h)
+
+            def _fmt(v):
+                if v is None: return "N/A"
+                v = float(v)
+                if abs(v) >= 1e9: return f"{v/1e9:.1f}B"
+                if abs(v) >= 1e6: return f"{v/1e6:.1f}M"
+                if abs(v) >= 1e3: return f"{v/1e3:.1f}K"
+                return f"{int(v):,}"
+
+            _ncols = 2 + (1 if has_sa8 else 0) + (1 if has_rn8 else 0)
+            _grid_style = f"display:grid;grid-template-columns:repeat({_ncols},1fr);gap:14px;margin-bottom:20px;"
+            _kpi_html = f"<div style='{_grid_style}'>"
+            _kpi_html += _kpi("🏢", "Perusahaan Unik", f"{_total_co:,}", "client / invoice-to unik")
+            _kpi_html += _kpi("📄", "Total Invoice", f"{_total_inv:,}", "transaksi invoice", "#0F766E")
+            if has_sa8:
+                _kpi_html += _kpi("💰", "Total Revenue", _fmt(_total_sa), "Sales AR kumulatif", "#134E4A")
+            if has_rn8:
+                _kpi_html += _kpi("🌙", "Total Room Night", _fmt(_total_rn), "malam kamar", "#0D9488")
+            _kpi_html += "</div>"
+            st.markdown(_kpi_html, unsafe_allow_html=True)
+
+            # ── Chart + Tabel ─────────────────────────────────────────────────
+            _top_n = min(20, len(co8))
+            _top   = co8.head(_top_n).copy()
+
+            if has_sa8:
+                ca8, cb8 = st.columns([1, 1])
+            else:
+                ca8, cb8 = st.columns([3, 2])
+
+            with ca8:
+                # Bar chart Invoice
+                gsec("Top Perusahaan · Total Invoice", "🏢")
+                fb8 = px.bar(
+                    _top.sort_values("Total Invoice"),
+                    x="Total Invoice", y="Perusahaan", orientation="h",
+                    text="Total Invoice", color="Total Invoice",
+                    color_continuous_scale=["rgba(13,148,136,.2)","#0D9488","#134E4A"])
+                fb8.update_traces(
+                    texttemplate="%{x:,.0f}", textposition="outside",
+                    textfont=dict(size=10, color="#8898AA"),
+                    marker_line_width=0, marker_cornerradius=4, cliponaxis=False)
+                fb8.update_layout(
+                    yaxis=dict(categoryorder="total ascending", automargin=True),
+                    coloraxis_showscale=False, height=max(380, _top_n * 22),
+                    xaxis_title="", yaxis_title="", margin=dict(l=4, r=80, t=20, b=8))
+                st.plotly_chart(theme(fb8), use_container_width=True)
+
+            if has_sa8:
+                with cb8:
+                    # Bar chart Revenue
+                    gsec("Top Perusahaan · Revenue (Sales AR)", "💰")
+                    fb8r = px.bar(
+                        _top.sort_values("Sales AR"),
+                        x="Sales AR", y="Perusahaan", orientation="h",
+                        text="Sales AR", color="Sales AR",
+                        color_continuous_scale=["rgba(19,78,74,.2)","#0F766E","#042F2E"])
+                    fb8r.update_traces(
+                        texttemplate="%{x:,.0f}", textposition="outside",
+                        textfont=dict(size=10, color="#8898AA"),
+                        marker_line_width=0, marker_cornerradius=4, cliponaxis=False)
+                    fb8r.update_layout(
+                        yaxis=dict(categoryorder="total ascending", automargin=True),
+                        coloraxis_showscale=False, height=max(380, _top_n * 22),
+                        xaxis_title="", yaxis_title="", margin=dict(l=4, r=80, t=20, b=8))
+                    st.plotly_chart(theme(fb8r), use_container_width=True)
+
+            # ── Search & Tabel lengkap ────────────────────────────────────────
+            gsec("Tabel Lengkap Perusahaan", "📋")
+            _search8 = st.text_input("🔍 Cari nama perusahaan...", key="search_company",
+                                     placeholder="Ketik nama perusahaan...")
+            _tbl8 = co8.copy()
+            if _search8:
+                _tbl8 = _tbl8[_tbl8["Perusahaan"].str.contains(_search8, case=False, na=False)]
+
+            # Format display columns
+            _fmt_dict8 = {"Total Invoice": "{:,.0f}"}
+            if has_sa8: _fmt_dict8["Sales AR"] = "{:,.0f}"
+            if has_sa8: _fmt_dict8["Avg Revenue/Inv"] = "{:,.0f}"
+            if has_rn8: _fmt_dict8["Total Room Night"] = "{:,.0f}"
+
+            _num_cols8 = [c for c in _tbl8.columns if pd.api.types.is_numeric_dtype(_tbl8[c])]
+            _sty8 = _tbl8.reset_index(drop=True).style.format({c: "{:,.0f}" for c in _num_cols8})
+            if "Total Invoice" in _num_cols8 and len(_tbl8) > 1:
+                _sty8 = _sty8.apply(
+                    lambda s: [f"background-color: rgba(13,148,136,{0.05 + 0.55*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color:#0F172A"
+                               for v in s] if s.max() > s.min() else [""] * len(s),
+                    subset=["Total Invoice"])
+            if has_sa8 and "Sales AR" in _num_cols8 and len(_tbl8) > 1:
+                _sty8 = _sty8.apply(
+                    lambda s: [f"background-color: rgba(19,78,74,{0.04 + 0.45*(float(v)-float(s.min()))/(float(s.max())-float(s.min())+1e-9):.2f}); color:#0F172A"
+                               for v in s] if s.max() > s.min() else [""] * len(s),
+                    subset=["Sales AR"])
+
+            st.dataframe(_sty8, width="stretch", height=500)
+            st.caption(f"Menampilkan {len(_tbl8):,} dari {len(co8):,} perusahaan")
+
+            # ── Download ──────────────────────────────────────────────────────
+            _ob8 = io.BytesIO()
+            with pd.ExcelWriter(_ob8, engine="xlsxwriter") as _w8:
+                co8.to_excel(_w8, index=False, sheet_name="Perusahaan")
+            c8a, c8b = st.columns(2)
+            with c8a:
+                st.download_button(
+                    "⬇ Download Excel", _ob8.getvalue(),
+                    "perusahaan_revenue.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True)
+            with c8b:
+                st.download_button(
+                    "⬇ Download CSV",
+                    co8.to_csv(index=False).encode("utf-8"),
+                    "perusahaan_revenue.csv", "text/csv",
+                    use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # EMPTY STATE
