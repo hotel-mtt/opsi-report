@@ -663,84 +663,100 @@ def get_prev_period_metrics(df_raw, df_view):
 
 # ── Donut HTML ────────────────────────────────────────────────────────────────
 def build_donut_html(segments, total_label, subtitle=""):
-    import json
-    segs_js = json.dumps(segments, ensure_ascii=False)
-    html = """<!DOCTYPE html><html><head><meta charset="UTF-8">
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@700;800&family=DM+Sans:wght@400;600;700&display=swap" rel="stylesheet">
-<style>
-*{box-sizing:border-box;margin:0;padding:0;}
-body{background:transparent;font-family:'DM Sans',sans-serif;}
-.wrap{background:#fff;border:1px solid #E2E8F0;border-radius:16px;padding:18px 20px 14px;width:100%;}
-.hdr{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px;gap:8px;}
-.title{font-family:'Space Grotesk',sans-serif;font-size:.88rem;font-weight:700;color:#0F172A;}
-.sub{font-size:.53rem;color:#94A3B8;margin-top:3px;}
-.live{display:flex;align-items:center;gap:5px;background:#F0FDF9;border:1px solid #CCFBF1;border-radius:8px;padding:4px 10px;font-size:.54rem;font-weight:700;color:#0D9488;}
-.dot{width:6px;height:6px;border-radius:50%;background:#0D9488;animation:pulse 2s infinite;}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-.body{display:flex;align-items:center;gap:18px;flex-wrap:wrap;}
-.cwrap{position:relative;flex-shrink:0;}
-.ctxt{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;}
-.cnum{font-family:'Space Grotesk',sans-serif;font-size:1.2rem;font-weight:800;color:#0F172A;line-height:1;}
-.clbl{font-size:.5rem;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:#94A3B8;}
-.legend{flex:1;min-width:130px;display:flex;flex-direction:column;gap:2px;}
-.lrow{display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:9px;cursor:default;}
-.lrow:hover{background:#F0FDF9;}
-.lcolor{width:9px;height:9px;border-radius:3px;flex-shrink:0;}
-.lbody{flex:1;min-width:0;}
-.lname{font-size:.64rem;font-weight:700;color:#0F172A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px;}
-.lbwrap{height:4px;background:#F1F5F9;border-radius:4px;overflow:hidden;margin-bottom:3px;}
-.lbar{height:100%;border-radius:4px;width:0;transition:width .9s cubic-bezier(.4,0,.2,1);}
-.lmeta{display:flex;justify-content:space-between;align-items:center;}
-.lval{font-family:'Space Grotesk',sans-serif;font-size:.59rem;font-weight:700;}
-.lpct{font-size:.53rem;font-weight:600;padding:1px 6px;border-radius:10px;}
-</style></head><body>
-<div class="wrap">
-  <div class="hdr">
-    <div><div class="title">&#127758; Distribusi Invoice</div><div class="sub">SUBTITLE</div></div>
-    <div class="live"><span class="dot"></span>Live</div>
-  </div>
-  <div class="body">
-    <div class="cwrap">
-      <svg width="170" height="170" viewBox="0 0 170 170" id="svg"></svg>
-      <div class="ctxt"><div class="cnum" id="cnum">-</div><div class="clbl">INVOICE</div></div>
+    """Render donut chart sebagai pure SVG — tidak butuh JS, kompatibel st.html()."""
+    import math
+
+    if not segments:
+        return "<div style='padding:20px;color:#94A3B8;font-size:.8rem;'>Tidak ada data</div>"
+
+    CX, CY, R, SW, GAP_DEG = 90, 90, 62, 24, 1.5
+    total_pct = sum(s["pct"] for s in segments) or 1
+    avail_deg = 360 - GAP_DEG * len(segments)
+
+    def polar(deg):
+        rad = math.radians(deg - 90)
+        return CX + R * math.cos(rad), CY + R * math.sin(rad)
+
+    def donut_path(start_d, end_d, color):
+        ro, ri = R + SW / 2, R - SW / 2
+        large = 1 if (end_d - start_d) > 180 else 0
+        x1, y1 = polar(start_d + 0.8)
+        x2, y2 = polar(end_d - 0.8)
+        ix1, iy1 = polar(end_d - 0.8)
+        ix2, iy2 = polar(start_d + 0.8)
+        # outer arc + inner arc
+        ox1 = CX + ro * math.cos(math.radians(start_d + 0.8 - 90))
+        oy1 = CY + ro * math.sin(math.radians(start_d + 0.8 - 90))
+        ox2 = CX + ro * math.cos(math.radians(end_d - 0.8 - 90))
+        oy2 = CY + ro * math.sin(math.radians(end_d - 0.8 - 90))
+        rix1 = CX + ri * math.cos(math.radians(end_d - 0.8 - 90))
+        riy1 = CY + ri * math.sin(math.radians(end_d - 0.8 - 90))
+        rix2 = CX + ri * math.cos(math.radians(start_d + 0.8 - 90))
+        riy2 = CY + ri * math.sin(math.radians(start_d + 0.8 - 90))
+        d = (f"M {ox1:.2f} {oy1:.2f} "
+             f"A {ro} {ro} 0 {large} 1 {ox2:.2f} {oy2:.2f} "
+             f"L {rix1:.2f} {riy1:.2f} "
+             f"A {ri} {ri} 0 {large} 0 {rix2:.2f} {riy2:.2f} Z")
+        return '<path d="' + d + '" fill="' + color + '" />'
+
+    # Build SVG arcs
+    arc_paths = []
+    cur = 0
+    for seg in segments:
+        span = seg["pct"] / total_pct * avail_deg
+        if span > 0:
+            arc_paths.append(donut_path(cur, cur + span, seg["color"]))
+        cur += span + GAP_DEG
+
+    arcs_svg = "\n".join(arc_paths)
+
+    # Legend rows (pure HTML, no JS)
+    max_val = max((s["value"] for s in segments), default=1) or 1
+    legend_rows = []
+    for seg in segments:
+        bar_w  = round(seg["pct"] * 100 / 100, 1)  # already percentage
+        val_fmt = f"{seg['value']:,}".replace(",", ".")
+        legend_rows.append(f"""
+      <div style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;margin-bottom:2px;">
+        <div style="width:8px;height:8px;border-radius:2px;background:{seg['color']};flex-shrink:0;"></div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:.62rem;font-weight:700;color:#0F172A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{seg['label']}</div>
+          <div style="height:4px;background:#F1F5F9;border-radius:4px;margin:3px 0;">
+            <div style="height:100%;width:{seg['pct']}%;background:{seg['color']};border-radius:4px;"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;">
+            <span style="font-size:.58rem;font-weight:700;color:{seg['color']};">{val_fmt}</span>
+            <span style="font-size:.52rem;font-weight:600;padding:1px 5px;border-radius:8px;background:{seg['color']}18;color:{seg['color']};">{seg['pct']}%</span>
+          </div>
+        </div>
+      </div>""")
+
+    legend_html = "\n".join(legend_rows)
+
+    return f"""<div style="background:#fff;border:1px solid #E2E8F0;border-radius:16px;padding:16px 18px 14px;width:100%;">
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;">
+    <div>
+      <div style="font-size:.86rem;font-weight:700;color:#0F172A;">🌐 Distribusi Invoice</div>
+      <div style="font-size:.52rem;color:#94A3B8;margin-top:2px;">{subtitle}</div>
     </div>
-    <div class="legend" id="lg"></div>
+    <div style="display:flex;align-items:center;gap:5px;background:#F0FDF9;border:1px solid #CCFBF1;border-radius:8px;padding:4px 10px;font-size:.54rem;font-weight:700;color:#0D9488;">
+      <div style="width:6px;height:6px;border-radius:50%;background:#0D9488;"></div>Live
+    </div>
   </div>
-</div>
-<script>
-const SEGS=SEGS_JS,TOTAL="TOTAL_LBL";
-const CX=85,CY=85,R=65,SW=26,GAP=2.5;
-const svg=document.getElementById('svg');
-document.getElementById('cnum').textContent=TOTAL;
-const tp=SEGS.reduce((a,s)=>a+s.pct,0)||100,av=360-GAP*SEGS.length;
-function P(cx,cy,r,deg){const rad=(deg-90)*Math.PI/180;return[cx+r*Math.cos(rad),cy+r*Math.sin(rad)];}
-function arc(s,e){const ro=R+SW/2,ri=R-SW/2,lg=e-s>180?1:0;
-const[x1,y1]=P(CX,CY,ro,s+1),[x2,y2]=P(CX,CY,ro,e-1),[ix1,iy1]=P(CX,CY,ri,e-1),[ix2,iy2]=P(CX,CY,ri,s+1);
-return`M ${x1} ${y1} A ${ro} ${ro} 0 ${lg} 1 ${x2} ${y2} L ${ix1} ${iy1} A ${ri} ${ri} 0 ${lg} 0 ${ix2} ${iy2} Z`;}
-const tr=document.createElementNS('http://www.w3.org/2000/svg','circle');
-tr.setAttribute('cx',CX);tr.setAttribute('cy',CY);tr.setAttribute('r',R);
-tr.setAttribute('fill','none');tr.setAttribute('stroke','#F1F5F9');tr.setAttribute('stroke-width',SW);
-svg.appendChild(tr);
-let sd=0;SEGS.forEach((sg,i)=>{const sw=sg.pct/tp*av,ed=sd+sw;
-const p=document.createElementNS('http://www.w3.org/2000/svg','path');
-p.setAttribute('fill',sg.color);p.setAttribute('d',arc(sd,ed));
-p.style.opacity='0';p.style.transition=`opacity .3s ease ${i*.1}s`;
-svg.appendChild(p);sd=ed+GAP;});
-setTimeout(()=>svg.querySelectorAll('path').forEach(p=>p.style.opacity='1'),80);
-const lg=document.getElementById('lg');
-SEGS.forEach((sg,i)=>{const row=document.createElement('div');row.className='lrow';
-row.innerHTML=`<div class="lcolor" style="background:${sg.color};"></div>`
-+`<div class="lbody"><div class="lname">${sg.label}</div>`
-+`<div class="lbwrap"><div class="lbar" id="b${i}" style="background:${sg.color};"></div></div>`
-+`<div class="lmeta"><span class="lval" style="color:${sg.color};">${Number(sg.value).toLocaleString('id-ID')}</span>`
-+`<span class="lpct" style="background:${sg.color}18;color:${sg.color};">${sg.pct}%</span></div></div>`;
-lg.appendChild(row);});
-setTimeout(()=>SEGS.forEach((_,i)=>document.getElementById('b'+i).style.width=SEGS[i].pct+'%'),300);
-</script></body></html>"""
-    html = html.replace("SEGS_JS", segs_js)
-    html = html.replace("TOTAL_LBL", str(total_label))
-    html = html.replace("SUBTITLE", subtitle)
-    return html
+  <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+    <div style="position:relative;flex-shrink:0;">
+      <svg width="180" height="180" viewBox="0 0 180 180" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="{CX}" cy="{CY}" r="{R}" fill="none" stroke="#F1F5F9" stroke-width="{SW}" />
+        {arcs_svg}
+      </svg>
+      <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;">
+        <div style="font-size:1.15rem;font-weight:800;color:#0F172A;line-height:1;">{total_label}</div>
+        <div style="font-size:.48rem;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:#94A3B8;">INVOICE</div>
+      </div>
+    </div>
+    <div style="flex:1;min-width:130px;">{legend_html}</div>
+  </div>
+</div>"""
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CSS
