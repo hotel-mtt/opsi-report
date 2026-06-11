@@ -39,3 +39,8 @@ python-calamine>=0.5.0
 # pyarrow: diperlukan untuk pd.read_parquet / to_parquet
 # Tanpa ini cache Parquet tidak aktif (app tetap jalan)
 pyarrow>=14.0.0
+
+# ── Opsional: gradient warna di tabel ───────────────────────
+# Diperlukan oleh pandas Styler .background_gradient()
+# Sudah diganti manual di v10.0 — tidak wajib lagi
+# matplotlib>=3.7.0
